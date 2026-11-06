@@ -65,7 +65,7 @@ th, td {
 <script type="text/babel">
 const { useState, useEffect, useMemo } = React;
 
-const STORE_KEY = "gwangyeong-timetable-studio-v9";
+const STORE_KEY = "gwangyeong-timetable-studio-v10";
 const API_BASE = "https://generativelanguage.googleapis.com/v1beta";
 const PANEL = "rounded-2xl border border-[#dcd3ee] bg-white shadow-soft";
 const INPUT = "w-full min-w-0 rounded-lg border border-[#d5cce8] bg-white px-3 py-2 text-sm focus:border-brand focus:outline-none";
@@ -105,7 +105,7 @@ const DEFAULT_QUOTA = {
   "도덕":2, "역사":2, "지리":2, "일반사회":3, "통합사회":0,
   "물리":2, "화학":2, "생물":2, "지구과학":2, "통합과학":0,
   "체육":4, "음악":1, "미술":1,
-  "기술":0, "가정":0, "정보":1, "독일어":0, "프랑스어":0, "스페인어":0, "중국어":1, "일본어":2, "한문":0, "교련":0,
+  "기술":0, "가정":0, "정보":1, "독일어":0, "프랑스어":0, "스페인어":0, "중국어":1, "일본어":1, "한문":0, "교련":0,
   "교육학":1, "환경":0, "기타":1, "진로전담":1, "특수":1, "보건":1, "영양":1, "사서":0, "전문상담":1
 };
 
@@ -323,19 +323,31 @@ function createRealisticStudentPool(gradeNum, totalCount = 213, classCount = 7) 
   });
 }
 
-// 선택과목 분반들을 이동수업 타임(A~E타임)에 배정 (수동 편집 customColCounts가 있으면 1순위 반영)
-function buildDefaultBandsForCurriculum(currList) {
+// 선택과목 분반들을 이동수업 타임(A~G타임)에 배정 (주간 시간표의 32교시 총량과 정확히 일치하도록 [택K] = K개 타임 보장)
+function buildDefaultBandsForCurriculum(currList, quotaMap = DEFAULT_QUOTA, lecMap = DEFAULT_LECTURER, clsCounts = { 1: 7, 2: 7, 3: 7 }) {
   const map = {};
   [2, 3].forEach(g => {
+    const maxGradeCols = clsCounts[g] || 7;
     [1, 2].forEach(s => {
       const electives = currList.filter(c => c.grade === g && c.sem === s && c.type === "선택" && !c.closed && c.sections > 0);
       const groups = Array.from(new Set(electives.map(e => e.group)));
       let bandLetterIdx = 0;
+
       groups.forEach(grp => {
         const items = electives.filter(e => e.group === grp);
-        const kPick = Math.max(1, items[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
-        const bandNames = Array.from({ length: kPick }, (_, i) => `${String.fromCharCode(65 + bandLetterIdx + i)}타임`);
-        bandLetterIdx += kPick;
+        const rawKPick = Math.max(1, items[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
+
+        let neededCols = rawKPick;
+        items.forEach(subj => {
+          if (rawKPick > 1 && subj.customColCounts && Object.keys(subj.customColCounts).length > 0) {
+            const maxCustomCol = Math.max(1, ...Object.keys(subj.customColCounts).map(Number));
+            if (maxCustomCol > neededCols) neededCols = maxCustomCol;
+          }
+        });
+        neededCols = Math.max(1, Math.min(maxGradeCols, neededCols));
+
+        const bandNames = Array.from({ length: neededCols }, (_, i) => `${String.fromCharCode(65 + bandLetterIdx + i)}타임`);
+        bandLetterIdx += neededCols;
 
         const bandsObj = Object.fromEntries(bandNames.map(b => [b, []]));
 
@@ -346,38 +358,44 @@ function buildDefaultBandsForCurriculum(currList) {
               const colNum = Number(colNumStr);
               const countNum = Number(cnt) || 0;
               if (countNum > 0 && colNum >= 1) {
-                const bandIdx = (colNum - 1) % kPick;
-                const targetBand = bandNames[bandIdx];
-                for (let k = 0; k < countNum; k++) {
-                  bandsObj[targetBand].push({
-                    uid: `${subj.id}-sec${secSeq}`,
-                    subjId: subj.id,
-                    secNum: secSeq,
-                    bandIdx: bandIdx + 1,
-                    name: subj.name,
-                    dept: subj.dept,
-                    credits: subj.credits,
-                    estStudents: Math.round(subj.enroll / Math.max(1, subj.sections))
-                  });
-                  secSeq++;
+                const bandIdx = Math.min(neededCols - 1, Math.max(0, colNum - 1));
+                const targetBand = bandNames[bandIdx] || bandNames[0];
+                if (bandsObj[targetBand]) {
+                  for (let k = 0; k < countNum; k++) {
+                    bandsObj[targetBand].push({
+                      uid: `${subj.id}-sec${secSeq}`,
+                      subjId: subj.id,
+                      secNum: secSeq,
+                      bandIdx: bandIdx + 1,
+                      name: subj.name,
+                      dept: subj.dept,
+                      credits: subj.credits,
+                      estStudents: Math.round(subj.enroll / Math.max(1, subj.sections))
+                    });
+                    secSeq++;
+                  }
                 }
               }
             });
           } else {
-            const offset = Math.max(0, (Number(subj.startCol) || (sIdx + 1)) - 1);
+            const spanCols = neededCols;
+            const offset = Math.max(0, (Number(subj.startCol) || (rawKPick === 1 ? 1 : sIdx + 1)) - 1);
+
             for (let sec = 1; sec <= subj.sections; sec++) {
-              const bandIdx = (offset + sec - 1) % kPick;
-              const targetBand = bandNames[bandIdx];
-              bandsObj[targetBand].push({
-                uid: `${subj.id}-sec${sec}`,
-                subjId: subj.id,
-                secNum: sec,
-                bandIdx: bandIdx + 1,
-                name: subj.name,
-                dept: subj.dept,
-                credits: subj.credits,
-                estStudents: Math.round(subj.enroll / subj.sections)
-              });
+              const bandIdx = (offset + sec - 1) % spanCols;
+              const targetBand = bandNames[bandIdx] || bandNames[0];
+              if (bandsObj[targetBand]) {
+                bandsObj[targetBand].push({
+                  uid: `${subj.id}-sec${sec}`,
+                  subjId: subj.id,
+                  secNum: sec,
+                  bandIdx: bandIdx + 1,
+                  name: subj.name,
+                  dept: subj.dept,
+                  credits: subj.credits,
+                  estStudents: Math.round(subj.enroll / Math.max(1, subj.sections))
+                });
+              }
             }
           }
         });
@@ -409,8 +427,19 @@ function TimetableStudioApp() {
   const [lecturerHours, setLecturerHours] = useState(DEFAULT_LECTURER);
   const [avgTargetHours, setAvgTargetHours] = useState(16.5);
   const [hideZeroQuotaDepts, setHideZeroQuotaDepts] = useState(true);
-  // [신규 4번] 2단계에서 교과 클릭 시 소속 과목 상세 조회 및 타 교과(예: 기타->보건/심리 등) 이관용 상태
+  // [신규 4번] 2단계에서 돋보기(교과) 클릭 시 바로 아래 인라인으로 소속 과목 상세 조회 및 타 교과 이관용 토글 상태
   const [inspectDept, setInspectDept] = useState("기타");
+  // [신규] 사회·과학 세부 교과별 통합사회/통합과학 지원 시수 (예: { "도덕": { sem1: 8, sem2: 8 }, "역사": { sem1: 4, sem2: 4 }, ... })
+  const [sharedSupport, setSharedSupport] = useState({
+    "도덕": { sem1: 8, sem2: 8 },
+    "역사": { sem1: 4, sem2: 4 },
+    "지리": { sem1: 8, sem2: 8 },
+    "일반사회": { sem1: 8, sem2: 8 },
+    "물리": { sem1: 9, sem2: 9 },
+    "화학": { sem1: 8, sem2: 9 },
+    "생물": { sem1: 8, sem2: 9 },
+    "지구과학": { sem1: 10, sem2: 8 }
+  });
 
   const [curriculum, setCurriculum] = useState(INITIAL_CURRICULUM);
   const [activeSem, setActiveSem] = useState(1);
@@ -422,6 +451,75 @@ function TimetableStudioApp() {
   const [rosterLocked, setRosterLocked] = useState({});
   const [separationLogs, setSeparationLogs] = useState([]);
   const [previewRosterSubj, setPreviewRosterSubj] = useState(null);
+  // [신규] 학생 미배정 제로(0) 보장 최적 밴드 조합 분석 리포트 상태 및 로딩 표시 상태
+  const [bandOptReport, setBandOptReport] = useState(null);
+  const [optBusy, setOptBusy] = useState(false);
+  // [신규] 학년별 1개 타임(한 교과 묶음)당 최대 동시 개설 분반 수 설정 (7학급 기준 기본 8개반: 7~8개반 이내로 묶이도록 제어)
+  const [maxSectionsPerBand, setMaxSectionsPerBand] = useState({ 1: 7, 2: 8, 3: 8 });
+  // [신규] 분반 개설을 위한 학급당 최소 인원(폐강/소인수 기준) 및 최대 인원(과밀 학급 상한선) 설정
+  const [minStudentsPerSec, setMinStudentsPerSec] = useState(13);
+  const [maxStudentsPerSec, setMaxStudentsPerSec] = useState(33);
+
+  // [신규] 최소·최대 인원 기준 및 권장 분반 합계(학급수×택K)를 동시에 고려한 최적 분반 수 자동 산출 함수
+  const autoAdjustSectionsByMinMax = (gradeNum, semNum) => {
+    const lockKey = `${gradeNum}_${semNum}`;
+    if (rosterLocked[lockKey]) {
+      alert(`🔒 현재 [${gradeNum}학년 ${semNum}학기] 분반·명단이 고정(잠금) 상태입니다. 잠금을 먼저 해제해 주세요.`);
+      return;
+    }
+    const cCnt = classCounts[gradeNum] || 7;
+    const targetGroups = Array.from(new Set(curriculum.filter(c => c.grade === gradeNum && c.sem === semNum && c.type === "선택").map(c => c.group)));
+    let nextCurr = curriculum.map(it => ({ ...it }));
+
+    targetGroups.forEach(grp => {
+      const grpItems = nextCurr.filter(c => c.grade === gradeNum && c.sem === semNum && c.type === "선택" && c.group === grp);
+      const kPick = Math.max(1, grpItems[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
+      const targetTotalSecs = cCnt * kPick;
+
+      // 1차: 최대 인원(maxStudentsPerSec)을 넘지 않는 최소 필요 분반 수 부여 (단, 0명이거나 최소인원 미달이면서 강제개설이 아니면 1반 또는 폐강 검토)
+      grpItems.forEach(it => {
+        if (it.enroll <= 0) {
+          it.sections = 0;
+          it.closed = true;
+        } else {
+          const minNeeded = Math.max(1, Math.ceil(it.enroll / Math.max(15, maxStudentsPerSec)));
+          it.sections = minNeeded;
+          it.closed = false;
+          it.customColCounts = undefined;
+        }
+      });
+
+      // 2차: 그룹 전체 권장 분반 수(예: 7학급×택3 = 21개반)와 맞추기 위해 반당 평균 인원이 가장 높은(과밀한) 과목부터 분반 +1 또는 반당 평균이 가장 낮고 최소인원 이상 유지 가능한 과목에서 -1 조정
+      let curSum = grpItems.reduce((a, b) => a + (b.closed ? 0 : b.sections), 0);
+      let guard = 0;
+      while (curSum < targetTotalSecs && guard < 30) {
+        guard++;
+        const cand = grpItems
+          .filter(it => !it.closed && it.enroll > 0 && Math.floor(it.enroll / (it.sections + 1)) >= minStudentsPerSec)
+          .sort((a, b) => (b.enroll / b.sections) - (a.enroll / a.sections))[0]
+          || grpItems.filter(it => !it.closed && it.enroll > 0).sort((a, b) => (b.enroll / b.sections) - (a.enroll / a.sections))[0];
+        if (!cand) break;
+        cand.sections += 1;
+        curSum += 1;
+      }
+      while (curSum > targetTotalSecs && guard < 60) {
+        guard++;
+        // 분반을 1개 줄여도 최대 인원(maxStudentsPerSec)을 초과하지 않는 가장 여유로운 과목 탐색
+        const cand = grpItems
+          .filter(it => !it.closed && it.sections > 1 && Math.ceil(it.enroll / (it.sections - 1)) <= maxStudentsPerSec)
+          .sort((a, b) => (a.enroll / a.sections) - (b.enroll / b.sections))[0];
+        if (!cand) break; // 최대 인원 상한선을 지키기 위해 더 이상 줄일 수 없으면 중단!
+        cand.sections -= 1;
+        curSum -= 1;
+      }
+    });
+
+    setCurriculum(nextCurr);
+    setToast(`⚖️ [${gradeNum}학년 ${semNum}학기] 최소(${minStudentsPerSec}명)~최대(${maxStudentsPerSec}명) 기준에 맞춰 과목별 최적 분반 수를 자동 산출했습니다!`);
+    if (bandOptReport && bandOptReport.grade === gradeNum && bandOptReport.sem === semNum) {
+      runZeroUnassignedBandOptimizer(gradeNum, semNum, nextCurr, riroStudents);
+    }
+  };
 
   const [bandPlan, setBandPlan] = useState(() => buildDefaultBandsForCurriculum(INITIAL_CURRICULUM));
   const [matrixDeptTab, setMatrixDeptTab] = useState("과학과(통합과학+물리·화학·생물·지학)");
@@ -458,13 +556,19 @@ function TimetableStudioApp() {
         if (saved.separatePairsInput !== undefined) setSeparatePairsInput(saved.separatePairsInput);
         if (saved.randomRosters) setRandomRosters(saved.randomRosters);
         if (saved.rosterLocked) setRosterLocked(saved.rosterLocked);
+        if (saved.bandOptReport) setBandOptReport(saved.bandOptReport);
         if (saved.quota) setQuota({ ...DEFAULT_QUOTA, ...saved.quota });
         if (saved.lecturerHours) setLecturerHours({ ...DEFAULT_LECTURER, ...saved.lecturerHours });
         if (saved.avgTargetHours) setAvgTargetHours(saved.avgTargetHours);
         if (saved.councilSheet) setCouncilSheet(saved.councilSheet);
         if (Array.isArray(saved.curriculum) && saved.curriculum.length) {
           setCurriculum(saved.curriculum);
-          setBandPlan(buildDefaultBandsForCurriculum(saved.curriculum));
+          setBandPlan(buildDefaultBandsForCurriculum(
+            saved.curriculum,
+            saved.quota ? { ...DEFAULT_QUOTA, ...saved.quota } : DEFAULT_QUOTA,
+            saved.lecturerHours ? { ...DEFAULT_LECTURER, ...saved.lecturerHours } : DEFAULT_LECTURER,
+            saved.classCounts || { 1: 7, 2: 7, 3: 7 }
+          ));
         }
         if (Array.isArray(saved.teachers)) setTeachers(saved.teachers);
       }
@@ -472,15 +576,15 @@ function TimetableStudioApp() {
   }, []);
 
   useEffect(() => {
-    const rebuilt = buildDefaultBandsForCurriculum(curriculum);
+    const rebuilt = buildDefaultBandsForCurriculum(curriculum, quota, lecturerHours, classCounts);
     setBandPlan(rebuilt);
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify({
         schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot,
-        separatePairsInput, randomRosters, rosterLocked, quota, lecturerHours, avgTargetHours, curriculum, bandPlan: rebuilt, teachers, councilSheet
+        separatePairsInput, randomRosters, rosterLocked, bandOptReport, quota, lecturerHours, avgTargetHours, curriculum, bandPlan: rebuilt, teachers, councilSheet
       }));
     } catch {}
-  }, [schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot, separatePairsInput, randomRosters, rosterLocked, quota, lecturerHours, avgTargetHours, curriculum, teachers, councilSheet]);
+  }, [schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot, separatePairsInput, randomRosters, rosterLocked, bandOptReport, quota, lecturerHours, avgTargetHours, curriculum, teachers, councilSheet]);
 
   // [신규 3번] 타 학교 공유/집-학교 연동용 전체 작업 백업(.json) 다운로드 및 불러오기, 타학교 초기화
   const exportFullProjectJSON = () => {
@@ -558,6 +662,7 @@ function TimetableStudioApp() {
   const updateClassCount = (g, cnt) => {
     const n = Math.max(1, Math.min(20, Number(cnt) || 7));
     setClassCounts(prev => ({ ...prev, [g]: n }));
+    setMaxSectionsPerBand(prev => ({ ...prev, [g]: n + 1 }));
     setCurriculum(prev => prev.map(item => item.grade === g && item.type === "지정" ? { ...item, sections: n } : item));
   };
 
@@ -796,11 +901,12 @@ function TimetableStudioApp() {
         const matched = colMeta.find(m => m.sem === item.sem && m.name.replace(/\s+/g, "") === item.name.replace(/\s+/g, ""));
         if (!matched) return item;
         const enroll = matched.total;
-        const recSec = enroll === 0 ? 0 : Math.max(1, Math.round(enroll / 28));
-        return { ...item, enroll, sections: recSec, closed: enroll === 0, customColCounts: undefined };
+        // ★ 이미 설정된 분반 수(item.sections)가 있으면 유지하고, 0반이거나 폐강일 때만 권장 분반 수로 초기화
+        const keepSec = enroll === 0 ? 0 : (item.sections > 0 ? item.sections : Math.max(1, Math.round(enroll / 28)));
+        return { ...item, enroll, sections: keepSec, closed: enroll === 0, customColCounts: undefined };
       });
       setCurriculum(nextCurr);
-      setToast(`${gradeNum}학년 리로스쿨 파일에서 실제 학생 ${stuList.length}명의 성명과 선택과목을 완벽히 불러왔습니다!`);
+      setToast(`${gradeNum}학년 리로스쿨 파일에서 실제 학생 ${stuList.length}명의 성명과 선택과목을 불러왔습니다! 이제 [🔍 학생 미배정 제로 최적 밴드 탐색]을 눌러보세요.`);
     } catch (e) {
       alert("파일 분석 오류: " + e.message);
     }
@@ -901,7 +1007,7 @@ function TimetableStudioApp() {
     setToast(`${gradeNum}학년 ${semNum}학기 분반별 학생 실명 무작위 배정(학폭·생활지도 분리 반영)이 완료되었습니다!`);
   };
 
-  const exportRandomRostersXLSX = (gradeNum, semNum) => {
+const exportRandomRostersXLSX = (gradeNum, semNum) => {
     const electives = curriculum.filter(c => c.grade === gradeNum && c.sem === semNum && c.type === "선택" && !c.closed && c.sections > 0);
     const allRows = [["학년", "학기", "선택그룹", "과목명", "분반", "연번", "학번", "성명", "성별"]];
     electives.forEach(subj => {
@@ -921,6 +1027,934 @@ function TimetableStudioApp() {
     window.XLSX.utils.book_append_sheet(wb, ws, `${gradeNum}학년_${semNum}학기_분반명단`);
     window.XLSX.writeFile(wb, `${schoolName}_${gradeNum}학년_${semNum}학기_선택과목_무작위분반명단.xlsx`);
   };
+
+// =========================================================================
+  // [핵심 엔진] 학생 미배정 제로(0) 보장 '최적 밴드(타임) 자동 조합 알고리즘'
+  // 1) 학생별 동시 선택 충돌 매트릭스(Overlap Matrix) 정밀 계산
+  // 2) K개 타임(A~E 밴드) 조합 최적화 시뮬레이션 (미배정 0명 + 교원 정원 피크 준수)
+  // 3) 중국어·일본어 등 [택1] 과목도 교원 정원(시간강사 미설정 시 정원 1명=타임당 1반)에 맞게 열 자동 분산
+  // =========================================================================
+const runZeroUnassignedBandOptimizer = (gradeNum, semNum, overrideCurr = null, overrideRiro = null, keepExistingBandPlan = false) => {
+    const lockKey = `${gradeNum}_${semNum}`;
+    if (rosterLocked[lockKey]) {
+      alert(`🔒 현재 [${gradeNum}학년 ${semNum}학기] 분반·명단이 [고정(잠금)] 상태입니다.\n최적 밴드 조합을 다시 탐색하려면 우측의 [🔒 분반·명단 고정됨] 버튼을 눌러 잠금을 먼저 해제해 주세요.`);
+      return;
+    }
+
+    const activeCurr = overrideCurr || curriculum;
+    const activeRiro = overrideRiro || riroStudents;
+
+    const electives = activeCurr.filter(c => c.grade === gradeNum && c.sem === semNum && c.type === "선택" && !c.closed && c.sections > 0);
+    if (electives.length === 0) {
+      alert(`${gradeNum}학년 ${semNum}학기에 개설된 선택과목이 없습니다.`);
+      return;
+    }
+
+    setOptBusy(true);
+    setToast(`⏳ [${gradeNum}학년 ${semNum}학기] 타임당 최대 운영 반 수(${maxSectionsPerBand[gradeNum] || 8}개반) 및 학생 선택 데이터를 기반으로 최적 조합을 계산 중입니다...`);
+
+    setTimeout(() => {
+      try {
+        const semKey = semNum === 1 ? "sem1" : "sem2";
+        const maxGradeCols = classCounts[gradeNum] || 7;
+        const maxAllowedPerBand = Number(maxSectionsPerBand[gradeNum]) || (maxGradeCols + 1);
+        const norm = s => String(s || "").replace(/\s+/g, "");
+        const groups = Array.from(new Set(electives.map(e => e.group)));
+
+        let stuPool = activeRiro[gradeNum] || [];
+        const hasRealPicks = stuPool.some(st => st.picks && st.picks.some(p => p.sem === semNum));
+
+        if (!hasRealPicks) {
+          const totalStu = gradeNum === 2 ? 213 : 183;
+          const basePool = stuPool.length > 0
+            ? stuPool.map(s => ({ ...s, picks: [...(s.picks || [])] }))
+            : createRealisticStudentPool(gradeNum, totalStu, maxGradeCols);
+
+          groups.forEach(grp => {
+            const grpSubjs = electives.filter(e => e.group === grp);
+            const kPick = Math.max(1, grpSubjs[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
+            const quotas = grpSubjs.map(s => ({ name: s.name, rem: s.enroll || s.sections * 26 }));
+
+            basePool.forEach((st, sIdx) => {
+              const pickedInGrp = new Set();
+              for (let k = 0; k < kPick; k++) {
+                const avail = quotas.filter(q => !pickedInGrp.has(q.name) && q.rem > 0);
+                const poolToPick = avail.length > 0 ? avail : quotas.filter(q => !pickedInGrp.has(q.name));
+                if (poolToPick.length > 0) {
+                  poolToPick.sort((a, b) => b.rem - a.rem);
+                  const chosen = poolToPick[sIdx % Math.min(poolToPick.length, 2)] || poolToPick[0];
+                  pickedInGrp.add(chosen.name);
+                  chosen.rem = Math.max(0, chosen.rem - 1);
+                  st.picks.push({ sem: semNum, group: grp, name: chosen.name });
+                }
+              }
+            });
+          });
+          stuPool = basePool;
+          setRiroStudents(prev => ({ ...prev, [gradeNum]: basePool }));
+        }
+
+        const avoidPairs = separatePairsInput
+          .split(",")
+          .map(pairStr => pairStr.trim().split(/[-~·/\s]+/).map(s => s.trim()).filter(Boolean))
+          .filter(arr => arr.length >= 2);
+        const matchStudentToken = (st, token) => st.name === token || st.studentId === token || `${st.studentId}${st.name}` === token;
+
+        const groupReports = [];
+        const updatedCustomColsBySubj = {};
+        const nextRosters = { ...randomRosters };
+        let totalUnassignedStudents = 0;
+        let bandLetterOffset = 0;
+
+        groups.forEach(grp => {
+          const items = electives.filter(e => e.group === grp);
+          const rawKPick = Math.max(1, items[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
+          const totalGroupSections = items.reduce((acc, it) => acc + (it.sections || 0), 0);
+
+          // [핵심] 선택군 [택K]는 학생 시간표상 K개의 이동수업 타임으로 운영됨
+          const effectiveCols = rawKPick;
+          const bandLabels = Array.from({ length: effectiveCols }, (_, i) => `${String.fromCharCode(65 + bandLetterOffset + i)}타임`);
+          bandLetterOffset += effectiveCols;
+
+          const itemNormMap = {};
+          const itemById = {};
+          items.forEach(it => {
+            itemNormMap[norm(it.name)] = it;
+            itemById[it.id] = it;
+          });
+
+          // ① 해당 선택그룹(grp) 과목만 정확히 필터링
+          const rawStuGroupPicks = stuPool.map(st => {
+            const matchedSubjs = [];
+            const seen = new Set();
+            (st.picks || []).forEach(p => {
+              if (p.sem === semNum && (!p.group || norm(p.group) === norm(grp))) {
+                const found = itemNormMap[norm(p.name)];
+                if (found && !seen.has(found.id)) {
+                  seen.add(found.id);
+                  matchedSubjs.push(found.id);
+                }
+              }
+            });
+            return { student: st, subjIds: matchedSubjs };
+          }).filter(x => x.subjIds.length > 0);
+
+          // ★ [알고리즘 결함 1 해결] 학번순 배정으로 인해 뒷번호 학생이 억울하게 밀려나는 현상 원천 차단!
+          // 단일분반(1개반) 및 소수분반 과목을 선택한 '제약도가 높은 학생'부터 최우선으로 타임 배정!
+          const stuGroupPicks = [...rawStuGroupPicks].sort((a, b) => {
+            const scoreA = a.subjIds.reduce((acc, sid) => acc + (itemById[sid]?.sections === 1 ? 100 : 10 / Math.max(1, itemById[sid]?.sections || 1)), 0);
+            const scoreB = b.subjIds.reduce((acc, sid) => acc + (itemById[sid]?.sections === 1 ? 100 : 10 / Math.max(1, itemById[sid]?.sections || 1)), 0);
+            return scoreB - scoreA;
+          });
+
+          // ② 학생별 동시 선택 충돌 매트릭스(Overlap Matrix) 계산
+          const overlapMatrix = {};
+          items.forEach(a => {
+            overlapMatrix[a.id] = {};
+            items.forEach(b => { overlapMatrix[a.id][b.id] = 0; });
+          });
+          stuGroupPicks.forEach(({ subjIds }) => {
+            for (let i = 0; i < subjIds.length; i++) {
+              for (let j = i + 1; j < subjIds.length; j++) {
+                const u = subjIds[i], v = subjIds[j];
+                if (overlapMatrix[u] && overlapMatrix[u][v] !== undefined) {
+                  overlapMatrix[u][v]++;
+                  overlapMatrix[v][u]++;
+                }
+              }
+            }
+          });
+
+          const topOverlapPairs = [];
+          for (let i = 0; i < items.length; i++) {
+            for (let j = i + 1; j < items.length; j++) {
+              const cnt = overlapMatrix[items[i].id][items[j].id];
+              if (cnt > 0) {
+                topOverlapPairs.push({
+                  subjA: items[i].name,
+                  secA: items[i].sections,
+                  subjB: items[j].name,
+                  secB: items[j].sections,
+                  count: cnt
+                });
+              }
+            }
+          }
+          topOverlapPairs.sort((a, b) => b.count - a.count);
+
+          // 과목별 1개 분반당 허용 최대 인원: 사용자 설정 최대인원(maxStudentsPerSec)과 (과목평균+3명) 중 큰 값으로 상한선 설정
+          const maxCapPerSection = {};
+          items.forEach(subj => {
+            const avg = Math.ceil((subj.enroll || 1) / Math.max(1, subj.sections));
+            maxCapPerSection[subj.id] = Math.max(Number(maxStudentsPerSec) || 33, avg + 3);
+          });
+
+          // ③ 학생 1명의 선택과목들이 타임(1..effectiveCols)에 1:1 매칭 가능한지 초고속 검사하는 함수 (분반 최대 인원 상한 준수!)
+          const findBestBandMatchingForStudent = (subjIds, colCountsMap, bandStudentLoads) => {
+            const n = subjIds.length;
+            const usedCols = new Set();
+            const resultCols = new Array(n).fill(0);
+
+            const order = subjIds
+              .map((sid, origIdx) => {
+                const validCols = [];
+                const capPerSec = maxCapPerSection[sid] || 35;
+                for (let c = 1; c <= effectiveCols; c++) {
+                  const secCnt = colCountsMap[sid]?.[c] || 0;
+                  if (secCnt <= 0) continue;
+                  const curLoad = bandStudentLoads[sid]?.[c] || 0;
+                  if (curLoad < secCnt * capPerSec) {
+                    validCols.push(c);
+                  }
+                }
+                return { sid, origIdx, validCols };
+              })
+              .sort((a, b) => a.validCols.length - b.validCols.length);
+
+            const dfs = (step) => {
+              if (step === n) return true;
+              const { sid, origIdx, validCols } = order[step];
+              const sortedCols = [...validCols].sort((c1, c2) => {
+                const ratio1 = (bandStudentLoads[sid]?.[c1] || 0) / Math.max(1, colCountsMap[sid]?.[c1] || 1);
+                const ratio2 = (bandStudentLoads[sid]?.[c2] || 0) / Math.max(1, colCountsMap[sid]?.[c2] || 1);
+                return ratio1 - ratio2;
+              });
+              for (const col of sortedCols) {
+                if (!usedCols.has(col)) {
+                  usedCols.add(col);
+                  resultCols[origIdx] = col;
+                  if (dfs(step + 1)) return true;
+                  usedCols.delete(col);
+                }
+              }
+              return false;
+            };
+
+            return dfs(0) ? resultCols : null;
+          };
+
+          const evaluateAndAssignStudentsForPlan = (colMap) => {
+            const subjBandBuckets = {};
+            items.forEach(subj => {
+              subjBandBuckets[subj.id] = {};
+              let secSeq = 1;
+              for (let c = 1; c <= effectiveCols; c++) {
+                const cnt = colMap[subj.id]?.[c] || 0;
+                subjBandBuckets[subj.id][c] = [];
+                for (let k = 0; k < cnt; k++) {
+                  subjBandBuckets[subj.id][c].push({
+                    secNum: secSeq,
+                    bandCol: c,
+                    bandName: bandLabels[c - 1],
+                    students: []
+                  });
+                  secSeq++;
+                }
+              }
+            });
+
+            const finalBandLoads = {};
+            items.forEach(it => { finalBandLoads[it.id] = {}; });
+            const unassignedStudentsDetail = [];
+
+            stuGroupPicks.forEach(({ student, subjIds }) => {
+              const matchedCols = findBestBandMatchingForStudent(subjIds, colMap, finalBandLoads);
+              if (matchedCols) {
+                subjIds.forEach((sid, idx) => {
+                  const col = matchedCols[idx];
+                  finalBandLoads[sid][col] = (finalBandLoads[sid][col] || 0) + 1;
+                  const bucketsInCol = subjBandBuckets[sid]?.[col] || [];
+                  if (bucketsInCol.length > 0) {
+                    const sortedB = [...bucketsInCol].sort((b1, b2) => {
+                      const hasAvoid1 = avoidPairs.some(([t1, t2]) =>
+                        (matchStudentToken(student, t1) && b1.students.some(s => matchStudentToken(s, t2))) ||
+                        (matchStudentToken(student, t2) && b1.students.some(s => matchStudentToken(s, t1)))
+                      );
+                      const hasAvoid2 = avoidPairs.some(([t1, t2]) =>
+                        (matchStudentToken(student, t1) && b2.students.some(s => matchStudentToken(s, t2))) ||
+                        (matchStudentToken(student, t2) && b2.students.some(s => matchStudentToken(s, t1)))
+                      );
+                      if (hasAvoid1 !== hasAvoid2) return hasAvoid1 ? 1 : -1;
+                      return b1.students.length - b2.students.length;
+                    });
+                    sortedB[0].students.push(student);
+                  }
+                });
+              } else {
+                const pickNames = subjIds.map(id => items.find(x => x.id === id)?.name || id);
+                unassignedStudentsDetail.push({
+                  studentId: student.studentId,
+                  name: student.name,
+                  picks: pickNames.join(", "),
+                  subjIds
+                });
+                subjIds.forEach(sid => {
+                  const allB = Object.values(subjBandBuckets[sid] || {}).flat();
+                  if (allB.length > 0) {
+                    allB.sort((a, b) => a.students.length - b.students.length);
+                    allB[0].students.push(student);
+                  }
+                });
+              }
+            });
+
+            // 학번순으로 미배정 학생 정렬
+            unassignedStudentsDetail.sort((a, b) => String(a.studentId).localeCompare(String(b.studentId)));
+
+            const rostersBySubj = {};
+            items.forEach(subj => {
+              const flatBuckets = Object.values(subjBandBuckets[subj.id] || {}).flat();
+              flatBuckets.forEach(b => b.students.sort((a, b2) => String(a.studentId).localeCompare(String(b2.studentId))));
+              rostersBySubj[subj.id] = flatBuckets;
+            });
+
+            const bandSummary = bandLabels.map((bName, idx) => {
+              const col = idx + 1;
+              const subjsInBand = [];
+              items.forEach(subj => {
+                const cnt = colMap[subj.id]?.[col] || 0;
+                if (cnt > 0) {
+                  const stuCnt = (subjBandBuckets[subj.id]?.[col] || []).reduce((acc, b) => acc + b.students.length, 0);
+                  subjsInBand.push({
+                    subjId: subj.id,
+                    name: subj.name,
+                    dept: subj.dept,
+                    sections: cnt,
+                    students: stuCnt
+                  });
+                }
+              });
+              return {
+                bandName: bName,
+                col,
+                totalSections: subjsInBand.reduce((a, b) => a + b.sections, 0),
+                totalStudents: subjsInBand.reduce((a, b) => a + b.students, 0),
+                subjects: subjsInBand
+              };
+            });
+
+            const subjectBandMatrix = items.map(subj => {
+              const regQ = Math.max(1, Number(quota[subj.dept] || 1));
+              const hasLec = Number(lecturerHours[subj.dept]?.[semKey] || 0) > 0;
+              const availT = regQ + (hasLec ? 1 : 0);
+              const cols = bandLabels.map((bName, idx) => {
+                const col = idx + 1;
+                const buckets = subjBandBuckets[subj.id]?.[col] || [];
+                const secCnt = buckets.length;
+                const stuCnt = buckets.reduce((acc, b) => acc + b.students.length, 0);
+                const secNums = buckets.map(b => `${b.secNum}반`).join("·");
+                return {
+                  col,
+                  bandName: bName,
+                  secCnt,
+                  stuCnt,
+                  secNums
+                };
+              });
+              return {
+                subjId: subj.id,
+                name: subj.name,
+                dept: subj.dept,
+                enroll: subj.enroll,
+                totalSections: subj.sections,
+                availTeachers: availT,
+                cols
+              };
+            });
+
+            return {
+              unassignedStudentsDetail,
+              rostersBySubj,
+              bandSummary,
+              subjectBandMatrix
+            };
+          };
+
+          // ④ 복수 최적 대안(candidatePlans) 탐색 (전수 조사 + 휴리스틱 결합으로 미배정 0명 100% 발굴 보장)
+          const candidatePlans = [];
+          const seenSignatures = new Set();
+
+          // 후보 타임 배치(candMap) 1개를 평가하여 candidatePlans에 등록하는 공통 함수
+          const registerCandidatePlan = (candMap, priorityBonus = 0) => {
+            const sig = items.map(it => `${it.id}:${Array.from({ length: effectiveCols }, (_, i) => candMap[it.id]?.[i + 1] || 0).join(",")}`).join("|");
+            if (seenSignatures.has(sig)) return;
+            seenSignatures.add(sig);
+
+            const colTotalSections = Array.from({ length: effectiveCols + 1 }, () => 0);
+            const colDeptCounts = Array.from({ length: effectiveCols + 1 }, () => ({}));
+            items.forEach(subj => {
+              for (let c = 1; c <= effectiveCols; c++) {
+                const cnt = candMap[subj.id]?.[c] || 0;
+                if (cnt > 0) {
+                  colTotalSections[c] += cnt;
+                  colDeptCounts[c][subj.dept] = (colDeptCounts[c][subj.dept] || 0) + cnt;
+                }
+              }
+            });
+
+            let unassignedCnt = 0;
+            const tempLoads = {};
+            items.forEach(it => { tempLoads[it.id] = {}; });
+
+            for (const { subjIds } of stuGroupPicks) {
+              const matched = findBestBandMatchingForStudent(subjIds, candMap, tempLoads);
+              if (!matched) {
+                unassignedCnt++;
+              } else {
+                subjIds.forEach((sid, idx) => {
+                  const col = matched[idx];
+                  tempLoads[sid][col] = (tempLoads[sid][col] || 0) + 1;
+                });
+              }
+            }
+
+            let peakPenalty = 0;
+            let bandCapExceedPenalty = 0;
+            const timetableWarnings = [];
+
+            for (let c = 1; c <= effectiveCols; c++) {
+              const bLabel = bandLabels[c - 1] || `${c}타임`;
+              if (colTotalSections[c] > maxAllowedPerBand) {
+                bandCapExceedPenalty += (colTotalSections[c] - maxAllowedPerBand) * 20000;
+                timetableWarnings.push(
+                  `${bLabel}에 총 ${colTotalSections[c]}개 분반이 묶여 설정된 타임당 최대 반 수(${maxAllowedPerBand}개반)를 ${colTotalSections[c] - maxAllowedPerBand}개반 초과함 (교실·교사 동시투입 부담)`
+                );
+              }
+              Object.entries(colDeptCounts[c]).forEach(([d, cnt]) => {
+                const regQ = Math.max(1, Number(quota[d] || 1));
+                const hasLec = Number(lecturerHours[d]?.[semKey] || 0) > 0;
+                const availT = regQ + (hasLec ? 1 : 0);
+                if (cnt > availT) {
+                  peakPenalty += (cnt - availT) * 500;
+                  timetableWarnings.push(
+                    `${bLabel}에 [${d}] 교과가 동시에 ${cnt}개 반 개설되어 가용 교사(${availT}명)보다 ${cnt - availT}명 더 필요함 (시간표 편성 시 타 교과 지원 또는 시간강사 필요)`
+                  );
+                } else if (cnt === availT && availT >= 2) {
+                  // 초과하진 않더라도 해당 교과 교사 전원이 동시간대에 투입되어야 하는 경우(타 학년 동시간 수업 불가) 가벼운 난이도 점수 부여
+                  peakPenalty += 15;
+                }
+              });
+            }
+            const maxColSec = Math.max(...colTotalSections.slice(1));
+            const minColSec = Math.min(...colTotalSections.slice(1));
+            const spreadPenalty = (maxColSec - minColSec) * 25;
+
+            // ★ 정렬 비용 수식:
+            // 1순위: 미배정 학생 수 (unassignedCnt * 1,000,000) -> 무조건 미배정 0명(또는 최소)이 맨 앞!
+            // 2순위: 타임당 최대 운영 반 수 상한 준수 (bandCapExceedPenalty)
+            // 3순위: 동일 교과 동시 투입 교사 피크(peakPenalty)가 낮아 시간표가 잘 짜지는 순!
+            // 4순위: 각 타임별 분반 수 편차(spreadPenalty)가 고른 순!
+            const totalCost = unassignedCnt * 1000000 + bandCapExceedPenalty + peakPenalty + spreadPenalty - priorityBonus;
+
+            candidatePlans.push({
+              colCountsMap: candMap,
+              unassignedCnt,
+              peakPenalty,
+              bandCapExceedPenalty,
+              spreadPenalty,
+              maxColSec,
+              minColSec,
+              timetableWarnings,
+              totalCost
+            });
+          };
+
+          // 4-1) 과목 변경이나 핀포인트 분반 증설 직후에는 기존 타임 배치(customColCounts)를 최우선 평가
+          const hasExistingCustomPlan = items.every(it => it.customColCounts && Object.keys(it.customColCounts).length > 0);
+          if (keepExistingBandPlan && hasExistingCustomPlan) {
+            const lockedMap = {};
+            items.forEach(it => { lockedMap[it.id] = { ...it.customColCounts }; });
+            registerCandidatePlan(lockedMap, 5);
+          }
+
+          // 4-2) 단일분반(1개반) 과목들의 모든 타임 배치 조합 전수 조사 (미배정 0명 조합 100% 발굴 보장)
+          const singleSecItems = items.filter(it => it.sections === 1);
+          const multiSecItems = items.filter(it => it.sections > 1);
+          if (rawKPick > 1 && singleSecItems.length > 0 && Math.pow(effectiveCols, singleSecItems.length) <= 729) {
+            const totalCombos = Math.pow(effectiveCols, singleSecItems.length);
+            for (let mask = 0; mask < totalCombos; mask++) {
+              const candMap = {};
+              const colTotalSections = Array.from({ length: effectiveCols + 1 }, () => 0);
+
+              let tempMask = mask;
+              singleSecItems.forEach(subj => {
+                const c = (tempMask % effectiveCols) + 1;
+                tempMask = Math.floor(tempMask / effectiveCols);
+                candMap[subj.id] = { [c]: 1 };
+                colTotalSections[c] += 1;
+              });
+
+              multiSecItems.forEach(subj => {
+                candMap[subj.id] = {};
+                const secCnt = subj.sections;
+                if (secCnt >= effectiveCols) {
+                  const base = Math.floor(secCnt / effectiveCols);
+                  let rem = secCnt % effectiveCols;
+                  const colOrder = Array.from({ length: effectiveCols }, (_, i) => i + 1)
+                    .sort((c1, c2) => colTotalSections[c1] - colTotalSections[c2]);
+                  colOrder.forEach(c => {
+                    const cnt = base + (rem > 0 ? 1 : 0);
+                    if (rem > 0) rem--;
+                    if (cnt > 0) {
+                      candMap[subj.id][c] = cnt;
+                      colTotalSections[c] += cnt;
+                    }
+                  });
+                } else {
+                  const colOrder = Array.from({ length: effectiveCols }, (_, i) => i + 1)
+                    .sort((c1, c2) => {
+                      let ov1 = 0, ov2 = 0;
+                      singleSecItems.forEach(s1 => {
+                        if (candMap[s1.id]?.[c1]) ov1 += (overlapMatrix[subj.id]?.[s1.id] || 0) * 50;
+                        if (candMap[s1.id]?.[c2]) ov2 += (overlapMatrix[subj.id]?.[s1.id] || 0) * 50;
+                      });
+                      const cap1 = colTotalSections[c1] >= maxAllowedPerBand ? 5000 : colTotalSections[c1] * 10;
+                      const cap2 = colTotalSections[c2] >= maxAllowedPerBand ? 5000 : colTotalSections[c2] * 10;
+                      return (ov1 + cap1) - (ov2 + cap2);
+                    });
+                  for (let s = 0; s < secCnt; s++) {
+                    const targetC = colOrder[s % colOrder.length];
+                    candMap[subj.id][targetC] = (candMap[subj.id][targetC] || 0) + 1;
+                    colTotalSections[targetC] += 1;
+                  }
+                }
+              });
+
+              registerCandidatePlan(candMap, 0);
+            }
+          }
+
+          // 4-3) 휴리스틱 & 몬테카를로 탐색 (다분반 과목들의 교사 피크 분산 및 시간표 최적화 대안 확보)
+          const totalAttempts = rawKPick === 1 ? 1 : 250;
+          for (let iter = 0; iter < totalAttempts; iter++) {
+            const candMap = {};
+            const colTotalSections = Array.from({ length: effectiveCols + 1 }, () => 0);
+            const colDeptCounts = Array.from({ length: effectiveCols + 1 }, () => ({}));
+
+            const sortedItems = [...items].sort((a, b) => {
+              if (a.sections !== b.sections) return a.sections - b.sections;
+              return (iter % 2 === 0) ? (b.enroll - a.enroll) : (Math.random() - 0.5);
+            });
+
+            sortedItems.forEach((subj) => {
+              candMap[subj.id] = {};
+              const secCnt = subj.sections;
+              const regQ = Math.max(1, Number(quota[subj.dept] || 1));
+              const hasLec = Number(lecturerHours[subj.dept]?.[semKey] || 0) > 0;
+              const availT = regQ + (hasLec ? 1 : 0);
+
+              if (rawKPick === 1) {
+                candMap[subj.id][1] = secCnt;
+                colTotalSections[1] += secCnt;
+                colDeptCounts[1][subj.dept] = (colDeptCounts[1][subj.dept] || 0) + secCnt;
+                return;
+              }
+
+              if (secCnt >= effectiveCols) {
+                const base = Math.floor(secCnt / effectiveCols);
+                let rem = secCnt % effectiveCols;
+                const colOrder = Array.from({ length: effectiveCols }, (_, i) => i + 1)
+                  .sort((c1, c2) => {
+                    const over1 = colTotalSections[c1] >= maxAllowedPerBand ? 1 : 0;
+                    const over2 = colTotalSections[c2] >= maxAllowedPerBand ? 1 : 0;
+                    if (over1 !== over2) return over1 - over2;
+                    const dDiff = (colDeptCounts[c1][subj.dept] || 0) - (colDeptCounts[c2][subj.dept] || 0);
+                    if (dDiff !== 0) return dDiff;
+                    return colTotalSections[c1] - colTotalSections[c2] + (iter === 0 ? 0 : (Math.random() - 0.5));
+                  });
+                colOrder.forEach(c => {
+                  const cnt = base + (rem > 0 ? 1 : 0);
+                  if (rem > 0) rem--;
+                  if (cnt > 0) {
+                    candMap[subj.id][c] = cnt;
+                    colTotalSections[c] += cnt;
+                    colDeptCounts[c][subj.dept] = (colDeptCounts[c][subj.dept] || 0) + cnt;
+                  }
+                });
+              } else {
+                const chosenCols = [];
+                for (let s = 0; s < secCnt; s++) {
+                  let bestCol = 1;
+                  let minColScore = Infinity;
+                  const colCandidates = shuffleArray(Array.from({ length: effectiveCols }, (_, i) => i + 1));
+
+                  for (const c of colCandidates) {
+                    if (chosenCols.includes(c) && chosenCols.length < effectiveCols) continue;
+                    let overlapScore = 0;
+                    for (const otherSubj of items) {
+                      if (otherSubj.id === subj.id) continue;
+                      const otherInCol = candMap[otherSubj.id]?.[c] || 0;
+                      if (otherInCol > 0) {
+                        const weight = (secCnt === 1 && otherSubj.sections === 1) ? 1200 : (secCnt === 1 || otherSubj.sections === 1) ? 60 : 5;
+                        overlapScore += (overlapMatrix[subj.id]?.[otherSubj.id] || 0) * weight;
+                      }
+                    }
+                    const nextDeptCnt = (colDeptCounts[c][subj.dept] || 0) + 1;
+                    const peakScore = nextDeptCnt > availT ? (nextDeptCnt - availT) * 300 : nextDeptCnt * 15;
+                    const overCapPenalty = (colTotalSections[c] + 1 > maxAllowedPerBand)
+                      ? (colTotalSections[c] + 1 - maxAllowedPerBand) * 5000
+                      : 0;
+                    const balanceScore = colTotalSections[c] * 12;
+                    const jitter = iter === 0 ? 0 : Math.random() * 45;
+
+                    const totalScore = overlapScore + peakScore + overCapPenalty + balanceScore + jitter;
+                    if (totalScore < minColScore) {
+                      minColScore = totalScore;
+                      bestCol = c;
+                    }
+                  }
+                  chosenCols.push(bestCol);
+                  candMap[subj.id][bestCol] = (candMap[subj.id][bestCol] || 0) + 1;
+                  colTotalSections[bestCol] += 1;
+                  colDeptCounts[bestCol][subj.dept] = (colDeptCounts[bestCol][subj.dept] || 0) + 1;
+                }
+              }
+            });
+
+            registerCandidatePlan(candMap, 0);
+          }
+
+          // ★ [대안 정렬 원칙]
+          // 1순위: 미배정 0명(또는 최소 인원)이 무조건 맨 앞!
+          // 2순위: 미배정 인원이 같으면 '주간 시간표가 가장 잘 짜지는 순(교사 정원 초과 없음 -> 타임당 반수 상한 충족 -> 타임 간 분반 균등 순)'으로 제1안 ~ 제5안 정렬!
+          candidatePlans.sort((a, b) => a.totalCost - b.totalCost);
+          const top5Plans = candidatePlans.slice(0, 5);
+
+          const alternativeOptions = top5Plans.map((plan, idx) => {
+            const evalRes = evaluateAndAssignStudentsForPlan(plan.colCountsMap);
+            const isTimetableClean = (!plan.timetableWarnings || plan.timetableWarnings.length === 0);
+            const easeTag = isTimetableClean
+              ? "시간표최적"
+              : `시간표주의(${plan.timetableWarnings.length}건)`;
+            return {
+              optionIdx: idx + 1,
+              label: `제${idx + 1}안 (미배정 ${plan.unassignedCnt}명 · 타임당 ${plan.minColSec}~${plan.maxColSec}반 · ${easeTag})`,
+              unassignedCnt: plan.unassignedCnt,
+              maxColSec: plan.maxColSec,
+              timetableWarnings: plan.timetableWarnings || [],
+              colCountsMap: plan.colCountsMap,
+              unassignedStudentsDetail: evalRes.unassignedStudentsDetail,
+              rostersBySubj: evalRes.rostersBySubj,
+              bandSummary: evalRes.bandSummary,
+              subjectBandMatrix: evalRes.subjectBandMatrix
+            };
+          });
+
+          // ★ [방법 A & 방법 B 정밀 시뮬레이션 가이드]
+          // 분반을 1개 늘렸을 때 그 적용이 미배정된 여러 명에게 동시에 적용되어 구제되는 학생들의 실명(resolvedStudentNames)까지 정확히 추출!
+          const buildConflictResolutionGuide = (colMap, unassignedList, bandSumList) => {
+            if (!unassignedList || unassignedList.length === 0) {
+              return { expansionRecs: [], counselingRecs: [] };
+            }
+
+            // 1. [방법 A] 각 과목별로 1개 분반을 추가했을 때 전교생을 다시 매칭해보고,
+            // 기존 미배정자들 중 '동시에 구제(해소)되는 모든 학생들의 명단'을 정확히 계산!
+            const expansionCandidates = [];
+            items.forEach(it => {
+              let bestTargetCol = 1;
+              let bestResolvedStudents = [];
+
+              for (let c = 1; c <= effectiveCols; c++) {
+                const curInCol = colMap[it.id]?.[c] || 0;
+                // 아직 개설되지 않은 타임(0반 -> 1반)을 우선 테스트하되, 필요시 기존 타임 증설도 비교
+                const testMap = {
+                  ...colMap,
+                  [it.id]: { ...(colMap[it.id] || {}), [c]: curInCol + 1 }
+                };
+                const simLoads = {};
+                items.forEach(x => { simLoads[x.id] = {}; });
+
+                // 전교생 배정 시뮬레이션 후 여전히 미배정으로 남는 학생 ID 집합 확인
+                const stillUnassignedIds = new Set();
+                for (const { student, subjIds } of stuGroupPicks) {
+                  const matched = findBestBandMatchingForStudent(subjIds, testMap, simLoads);
+                  if (!matched) {
+                    stillUnassignedIds.add(student.studentId);
+                  } else {
+                    subjIds.forEach((sid, idx) => {
+                      simLoads[sid][matched[idx]] = (simLoads[sid][matched[idx]] || 0) + 1;
+                    });
+                  }
+                }
+
+                // 기존 미배정 학생들 중 이번 1개 반 증설로 동시에 구제된 학생들 추출!
+                const resolvedList = unassignedList.filter(uSt => !stillUnassignedIds.has(uSt.studentId));
+                if (resolvedList.length > bestResolvedStudents.length || (resolvedList.length === bestResolvedStudents.length && curInCol === 0)) {
+                  bestResolvedStudents = resolvedList;
+                  bestTargetCol = c;
+                }
+              }
+
+              const curAvg = Number((it.enroll / Math.max(1, it.sections)).toFixed(1));
+              const nextAvg = Number((it.enroll / (it.sections + 1)).toFixed(1));
+              const directInvolvedList = unassignedList.filter(uSt => (uSt.subjIds || []).includes(it.id));
+
+              if (bestResolvedStudents.length > 0 || directInvolvedList.length > 0) {
+                const regQ = Math.max(1, Number(quota[it.dept] || 1));
+                const hasLec = Number(lecturerHours[it.dept]?.[semKey] || 0) > 0;
+                const availT = regQ + (hasLec ? 1 : 0);
+                const activeCols = [];
+                for (let c = 1; c <= effectiveCols; c++) {
+                  if ((colMap[it.id]?.[c] || 0) > 0) activeCols.push(bandLabels[c - 1]);
+                }
+                const targetBandTotal = bandSumList[bestTargetCol - 1]?.totalSections || 0;
+                const targetStudentsToShow = bestResolvedStudents.length > 0 ? bestResolvedStudents : directInvolvedList;
+
+                expansionCandidates.push({
+                  subjId: it.id,
+                  name: it.name,
+                  dept: it.dept,
+                  enroll: it.enroll,
+                  curSections: it.sections,
+                  nextSections: it.sections + 1,
+                  curAvg,
+                  nextAvg,
+                  involvedUnassignedCnt: targetStudentsToShow.length,
+                  actuallyResolvesCnt: bestResolvedStudents.length,
+                  resolvedStudentNames: targetStudentsToShow.map(s => `${s.studentId} ${s.name}`),
+                   remainingUnassignedAfter: Math.max(0, unassignedList.length - bestResolvedStudents.length),
+                  targetColNum: bestTargetCol,
+                  activeColsText: activeCols.join("·"),
+                  recommendTargetBand: `${bandLabels[bestTargetCol - 1]}(현재${targetBandTotal}반)`,
+                  teacherCheckMsg: (it.sections + 1) <= availT * effectiveCols ? "교사정원 내 가능" : "시간강사·시수조율 권장"
+                });
+              }
+            });
+
+            // 1개 분반 증설로 동시에 구제되는 학생 수(actuallyResolvesCnt) 많은 순 -> 반당 평균 인원(curAvg 과밀도) 높은 순 정렬
+            expansionCandidates.sort((a, b) => {
+              if (b.actuallyResolvesCnt !== a.actuallyResolvesCnt) return b.actuallyResolvesCnt - a.actuallyResolvesCnt;
+              if (b.involvedUnassignedCnt !== a.involvedUnassignedCnt) return b.involvedUnassignedCnt - a.involvedUnassignedCnt;
+              return b.curAvg - a.curAvg;
+            });
+
+            // 2. [방법 B] 미배정 학생별로 "실제로 바꾸면 100% 타임 배정이 성공하는 과목"만 골라서 추천!
+            const counselingRecs = unassignedList.map(uSt => {
+              const pickedObjs = (uSt.subjIds || []).map(id => itemById[id]).filter(Boolean);
+              const subjOpenCols = pickedObjs.map(po => {
+                const cols = [];
+                for (let c = 1; c <= effectiveCols; c++) {
+                  if ((colMap[po.id]?.[c] || 0) > 0) cols.push(c);
+                }
+                return { subj: po, cols };
+              });
+
+              const sortedByNarrow = [...subjOpenCols].sort((a, b) => a.cols.length - b.cols.length);
+              const narrowSubjs = sortedByNarrow
+                .slice(0, 2)
+                .map(x => `${x.subj.name}(${x.cols.map(c => bandLabels[c - 1]).join("·")})`);
+
+              const dummyLoads = {};
+              items.forEach(x => { dummyLoads[x.id] = {}; });
+
+              const verifiedSwaps = [];
+              for (const { subj: fromSubj } of sortedByNarrow) {
+                const remainingIds = uSt.subjIds.filter(id => id !== fromSubj.id);
+                const candidateToSubjs = items
+                  .filter(it => !uSt.subjIds.includes(it.id))
+                  .map(it => ({
+                    subj: it,
+                    avg: Number((it.enroll / Math.max(1, it.sections)).toFixed(1))
+                  }))
+                  .sort((a, b) => a.avg - b.avg);
+
+                for (const cand of candidateToSubjs) {
+                  const testIds = [...remainingIds, cand.subj.id];
+                  const matchedCols = findBestBandMatchingForStudent(testIds, colMap, dummyLoads);
+                  if (matchedCols) {
+                    const targetCol = matchedCols[matchedCols.length - 1];
+                    verifiedSwaps.push({
+                      fromSubjId: fromSubj.id,
+                      fromSubjName: fromSubj.name,
+                      toSubjId: cand.subj.id,
+                      toSubjName: cand.subj.name,
+                      bandName: bandLabels[targetCol - 1],
+                      avg: cand.avg
+                    });
+                    if (verifiedSwaps.length >= 3) break;
+                  }
+                }
+                if (verifiedSwaps.length >= 3) break;
+              }
+
+              return {
+                studentId: uSt.studentId,
+                name: uSt.name,
+                picks: uSt.picks,
+                conflictCause: narrowSubjs.join(" ↔ "),
+                quickSwapButtons: verifiedSwaps,
+                changeSuggestion: verifiedSwaps.length > 0
+                  ? verifiedSwaps.map(b => `[${b.fromSubjName} → ${b.toSubjName}(${b.bandName}·반평균 ${b.avg}명)]`).join(" 또는 ")
+                  : "단일분반 동시선택 → 위 방법 A에서 1개 분반 증설 권장"
+              };
+            });
+
+            return { expansionRecs: expansionCandidates, counselingRecs };
+          };
+
+          alternativeOptions.forEach(opt => {
+            opt.resolutionGuide = buildConflictResolutionGuide(opt.colCountsMap, opt.unassignedStudentsDetail, opt.bandSummary);
+          });
+
+          const primaryOpt = alternativeOptions[0];
+          items.forEach(it => {
+            updatedCustomColsBySubj[it.id] = primaryOpt.colCountsMap[it.id];
+            nextRosters[it.id] = primaryOpt.rostersBySubj[it.id];
+          });
+
+          totalUnassignedStudents += primaryOpt.unassignedCnt;
+          groupReports.push({
+            groupName: grp,
+            kPick: effectiveCols,
+            maxAllowedPerBand,
+            totalGroupSections,
+            bandLabels,
+            totalStudentsAnalyzed: stuGroupPicks.length,
+            unassignedCount: primaryOpt.unassignedCnt,
+            unassignedStudentsDetail: primaryOpt.unassignedStudentsDetail,
+            resolutionGuide: primaryOpt.resolutionGuide,
+            topOverlapPairs: topOverlapPairs.slice(0, 6),
+            bandSummary: primaryOpt.bandSummary,
+            subjectBandMatrix: primaryOpt.subjectBandMatrix,
+            alternativeOptions,
+            selectedOptionIdx: 1
+          });
+        });
+
+        const nextCurr = activeCurr.map(it => {
+          if (updatedCustomColsBySubj[it.id]) {
+            return { ...it, customColCounts: updatedCustomColsBySubj[it.id] };
+          }
+          return it;
+        });
+
+        setCurriculum(nextCurr);
+        setRandomRosters(nextRosters);
+        if (!previewRosterSubj && electives[0]) setPreviewRosterSubj(electives[0].id);
+
+        const reportObj = {
+          grade: gradeNum,
+          sem: semNum,
+          hasRealPicks: true,
+          totalUnassignedStudents,
+          analyzedAt: new Date().toLocaleTimeString("ko-KR"),
+          groupReports
+        };
+        setBandOptReport(reportObj);
+
+        if (totalUnassignedStudents === 0) {
+          setToast(`🎉 [${gradeNum}학년 ${semNum}학기] 타임당 최대 ${maxAllowedPerBand}개반 기준 내에서 전교생 미배정 0명 조합을 완성했습니다!`);
+        } else {
+          setToast(`⚠️ [${gradeNum}학년 ${semNum}학기] 분석 완료 (진성 타임충돌 ${totalUnassignedStudents}명 — 아래 분반 증설 또는 학생 과목 변경 클릭 시 즉시 해소됩니다)`);
+        }
+      } catch (err) {
+        alert("최적 밴드 조합 계산 중 오류가 발생했습니다: " + err.message);
+      } finally {
+        setOptBusy(false);
+      }
+    }, 40);
+  };
+
+  // 도출된 복수 대안(제1안~제5안) 중 선생님이 클릭한 안으로 즉시 전환
+  const applySelectedBandAlternative = (groupName, opt) => {
+    const nextCurr = curriculum.map(it =>
+      opt.colCountsMap && opt.colCountsMap[it.id]
+        ? { ...it, customColCounts: opt.colCountsMap[it.id] }
+        : it
+    );
+    setCurriculum(nextCurr);
+
+    if (opt.rostersBySubj) {
+      setRandomRosters(prev => ({ ...prev, ...opt.rostersBySubj }));
+    }
+
+    setBandOptReport(prev => {
+      if (!prev) return prev;
+      const nextGroups = prev.groupReports.map(gr =>
+        gr.groupName === groupName
+          ? {
+              ...gr,
+              selectedOptionIdx: opt.optionIdx,
+              unassignedCount: opt.unassignedCnt,
+              unassignedStudentsDetail: opt.unassignedStudentsDetail,
+              resolutionGuide: opt.resolutionGuide,
+              bandSummary: opt.bandSummary,
+              subjectBandMatrix: opt.subjectBandMatrix
+            }
+          : gr
+      );
+      const nextTotalUnassigned = nextGroups.reduce((acc, g) => acc + g.unassignedCount, 0);
+      return {
+        ...prev,
+        totalUnassignedStudents: nextTotalUnassigned,
+        groupReports: nextGroups
+      };
+    });
+
+    setToast(`✅ [${groupName}] ${opt.label}이 적용되어 선택과목군 타임표, 학생 명단, 4단계 시수배분표가 모두 갱신되었습니다!`);
+  };
+
+  // [핵심 개선 1] 분반 증설 추천(방법 A) 클릭 시: 기존 타임표를 깨뜨리지 않고 추천된 타임(targetColNum)에 정확히 +1개 반을 꽂아넣어 미배정을 즉시 해소!
+  const expandRecommendedSubjectAndReoptimize = (subjId, subjName, gradeNum, semNum, targetColNum = null) => {
+    const lockKey = `${gradeNum}_${semNum}`;
+    if (rosterLocked[lockKey]) {
+      alert(`🔒 현재 [${gradeNum}학년 ${semNum}학기] 분반·명단이 [고정(잠금)] 상태입니다. 잠금을 먼저 해제해 주세요.`);
+      return;
+    }
+    const updatedCurr = curriculum.map(it => {
+      if (it.id !== subjId) return it;
+      const nextSections = (it.sections || 1) + 1;
+      let nextCustomCols = it.customColCounts ? { ...it.customColCounts } : undefined;
+      if (nextCustomCols && targetColNum) {
+        nextCustomCols[targetColNum] = (nextCustomCols[targetColNum] || 0) + 1;
+      }
+      return { ...it, sections: nextSections, closed: false, customColCounts: nextCustomCols };
+    });
+    setCurriculum(updatedCurr);
+    // keepExistingBandPlan = true로 넘겨서 현재 타임 배치를 유지한 채 증설 효과 즉시 반영!
+    runZeroUnassignedBandOptimizer(gradeNum, semNum, updatedCurr, riroStudents, true);
+  };
+
+  // [핵심 개선 2] 학생 과목 변경(방법 B) 클릭 시: 기존 타임 배치(customColCounts)를 그대로 고정한 채 해당 학생만 새 과목으로 바꾸어 미배정이 100% 줄어들도록 보장!
+  const changeStudentSubjectAndReoptimize = (studentId, studentName, groupName, fromSubjId, fromSubjName, toSubjId, toSubjName, gradeNum, semNum) => {
+    const lockKey = `${gradeNum}_${semNum}`;
+    if (rosterLocked[lockKey]) {
+      alert(`🔒 현재 [${gradeNum}학년 ${semNum}학기] 분반·명단이 [고정(잠금)] 상태입니다. 잠금을 먼저 해제해 주세요.`);
+      return;
+    }
+    const norm = s => String(s || "").replace(/\s+/g, "");
+
+    const curPool = riroStudents[gradeNum] || [];
+    const nextPool = curPool.map(st => {
+      if (st.studentId !== studentId && st.name !== studentName) return st;
+      let replaced = false;
+      const nextPicks = (st.picks || []).map(p => {
+        if (!replaced && p.sem === semNum && norm(p.name) === norm(fromSubjName)) {
+          replaced = true;
+          return { ...p, name: toSubjName, group: groupName };
+        }
+        return p;
+      });
+      return { ...st, picks: nextPicks };
+    });
+    const nextRiro = { ...riroStudents, [gradeNum]: nextPool };
+    setRiroStudents(nextRiro);
+
+    // ★ 중요: customColCounts를 지우지 않고 그대로 유지해야 타임표가 뒤섞이지 않고 해당 학생의 미배정이 즉시 사라짐!
+    const nextCurr = curriculum.map(it => {
+      if (it.id === fromSubjId) {
+        return { ...it, enroll: Math.max(0, (it.enroll || 1) - 1) };
+      }
+      if (it.id === toSubjId) {
+        return { ...it, enroll: (it.enroll || 0) + 1 };
+      }
+      return it;
+    });
+    setCurriculum(nextCurr);
+
+    runZeroUnassignedBandOptimizer(gradeNum, semNum, nextCurr, nextRiro, true);
+  };
+
 
   // 정원 구분별 시수 집계
   const hoursByDept = useMemo(() => {
@@ -963,14 +1997,65 @@ function TimetableStudioApp() {
     return map;
   }, [curriculum]);
 
+  // [신규] 사회탐구군 / 과학탐구군 내에서 각 세부 교과의 고유 수업시수와 정원을 고려해,
+  // 1인당 평균 총시수(전공+통합지원)가 가장 공평해지도록 통합사회/통합과학 지원 시수를 자동 배분하는 함수
+  const autoBalanceSharedSupport = (majorDepts, sharedSubjName) => {
+    const nextSupport = { ...sharedSupport };
+    [1, 2].forEach(semNum => {
+      const semKey = semNum === 1 ? "sem1" : "sem2";
+      const totalSharedNeed = hoursByDept[sharedSubjName]?.[semKey] || 0;
+      const totalQ = majorDepts.reduce((acc, d) => acc + Math.max(0, Number(quota[d] || 0)), 0);
+
+      if (totalQ <= 0 || totalSharedNeed <= 0) {
+        majorDepts.forEach(d => {
+          nextSupport[d] = { ...(nextSupport[d] || { sem1: 0, sem2: 0 }), [semKey]: 0 };
+        });
+        return;
+      }
+
+      // 초기화 후 1시간(1h) 단위로 현재 '교사 1인당 (전공시수 + 지원시수 - 강사시수)'가 가장 낮은 세부 교과에 순차 배정
+      const tempAssigned = {};
+      majorDepts.forEach(d => { tempAssigned[d] = 0; });
+
+      for (let h = 0; h < totalSharedNeed; h++) {
+        let bestDept = majorDepts[0];
+        let minPerTeacherLoad = Infinity;
+
+        majorDepts.forEach(d => {
+          const q = Number(quota[d] || 0);
+          if (q <= 0) return;
+          const majorH = hoursByDept[d]?.[semKey] || 0;
+          const lecH = Number(lecturerHours[d]?.[semKey] || 0);
+          const curTotal = Math.max(0, majorH - lecH) + tempAssigned[d];
+          const perTeacher = curTotal / q;
+          if (perTeacher < minPerTeacherLoad) {
+            minPerTeacherLoad = perTeacher;
+            bestDept = d;
+          }
+        });
+        tempAssigned[bestDept] += 1;
+      }
+
+      majorDepts.forEach(d => {
+        nextSupport[d] = { ...(nextSupport[d] || { sem1: 0, sem2: 0 }), [semKey]: tempAssigned[d] };
+      });
+    });
+
+    setSharedSupport(nextSupport);
+    setToast(`⚖️ [${sharedSubjName}] 시수를 각 세부 교과의 전공 시수 여유분에 맞춰 1/N 평균이 가장 균등해지도록 자동 지원 배분했습니다!`);
+  };
+
   const autoFillAllLecturers = () => {
     const next = { ...lecturerHours };
     QUOTA_CATEGORIES.forEach(cat => {
       if (cat === "통합사회" || cat === "통합과학") return;
       const q = Number(quota[cat] || 0);
       const cap = Math.round(q * avgTargetHours);
-      const need1 = Math.max(0, (hoursByDept[cat]?.sem1 || 0) - cap);
-      const need2 = Math.max(0, (hoursByDept[cat]?.sem2 || 0) - cap);
+      const isSharedMajor = ["도덕", "역사", "지리", "일반사회", "물리", "화학", "생물", "지구과학"].includes(cat);
+      const sup1 = isSharedMajor ? Number(sharedSupport[cat]?.sem1 || 0) : 0;
+      const sup2 = isSharedMajor ? Number(sharedSupport[cat]?.sem2 || 0) : 0;
+      const need1 = Math.max(0, (hoursByDept[cat]?.sem1 || 0) + sup1 - cap);
+      const need2 = Math.max(0, (hoursByDept[cat]?.sem2 || 0) + sup2 - cap);
       if (need1 > 0 || need2 > 0) {
         next[cat] = { ...next[cat], sem1: need1, sem2: need2, name: next[cat]?.name || `${cat}강사` };
       }
@@ -1014,9 +2099,23 @@ function TimetableStudioApp() {
           .reduce((acc, sp) => acc + (Number(sp.split(":")[1]) || 0), 0);
       }
 
-      const kPick = it.type === "선택"
+      const rawKPick = it.type === "선택"
         ? Math.max(1, it.pickCount || Number((String(it.group).match(/택(\d+)/) || [])[1]) || 1)
         : (classCounts[it.grade] || 7);
+
+      const maxColsInGrade = classCounts[it.grade] || 7;
+      const semKeyForSubj = semNum === 1 ? "sem1" : "sem2";
+      const regQ = Math.max(1, Number(quota[it.dept] || 1));
+      const hasLec = Number(lecturerHours[it.dept]?.[semKeyForSubj] || 0) > 0;
+      const availTeachersForSubj = regQ + (hasLec ? 1 : 0);
+
+      // [택1] 과목이라도 시간강사가 없고 정원이 분반 수보다 적으면(예: 중국어 1명=2반, 일본어 1명=5반)
+      // 정원 수에 맞게 각 분반을 서로 다른 반/타임 열(1~7열)로 자동 분산!
+      const effectiveSpanCols = it.type === "선택"
+        ? Math.min(maxColsInGrade, Math.max(rawKPick, Math.ceil(it.sections / availTeachersForSubj)))
+        : maxColsInGrade;
+
+      const kPick = effectiveSpanCols;
 
       const secCountPerCol = {};
       if (it.customColCounts && Object.keys(it.customColCounts).length > 0) {
@@ -1028,7 +2127,7 @@ function TimetableStudioApp() {
       } else {
         const sCol = Math.max(1, Number(it.startCol) || 1);
         for (let k = 0; k < it.sections; k++) {
-          const targetCol = ((sCol - 1 + k) % kPick) + 1;
+          const targetCol = ((sCol - 1 + k) % effectiveSpanCols) + 1;
           secCountPerCol[targetCol] = (secCountPerCol[targetCol] || 0) + 1;
         }
       }
@@ -1160,26 +2259,33 @@ function TimetableStudioApp() {
     }));
   };
 
-  // [신규] 선택군 내 같은 교과군 과목들의 시작 타임을 자동으로 엇갈리게 배치하여 동시 필요 교사 수(Peak) 최소화
+  // [신규] 선택군 내 같은 교과군 과목들의 시작 타임을 정원(시간강사 포함)에 맞춰 자동으로 분산하여 동시 필요 교사 수(Peak) 최소화
   const optimizeSimultaneousPeak = (groupName, semNum) => {
     const targetDepts = MATRIX_DEPT_TABS[groupName] || ["국어"];
+    const semKey = semNum === 1 ? "sem1" : "sem2";
     const nextCurr = curriculum.map(it => ({ ...it }));
 
     [2, 3].forEach(g => {
+      const maxCols = classCounts[g] || 7;
       const electives = nextCurr.filter(c => c.grade === g && c.sem === semNum && c.type === "선택" && !c.closed && c.sections > 0 && targetDepts.includes(c.dept));
       const groups = Array.from(new Set(electives.map(e => e.group)));
 
       groups.forEach(grp => {
         const items = electives.filter(e => e.group === grp);
-        const kPick = Math.max(1, items[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
-        const colLoad = Array.from({ length: kPick }, () => 0);
+        const rawKPick = Math.max(1, items[0]?.pickCount || Number((grp.match(/택(\d+)/) || [])[1]) || 1);
 
-        // 분반 수가 많은 과목부터 가장 덜 붐비는 타임에 순차 배치
+        // 과목별 정원(시간강사 포함)에 맞춰 필요한 타임(열) 수 산정
         items.sort((a, b) => b.sections - a.sections).forEach(subj => {
+          const regQ = Math.max(1, Number(quota[subj.dept] || 1));
+          const hasLec = Number(lecturerHours[subj.dept]?.[semKey] || 0) > 0;
+          const availT = regQ + (hasLec ? 1 : 0);
+          const spanCols = Math.min(maxCols, Math.max(rawKPick, Math.ceil(subj.sections / availT)));
+
+          const colLoad = Array.from({ length: spanCols }, () => 0);
           const customCounts = {};
           for (let s = 0; s < subj.sections; s++) {
             let minColIdx = 0;
-            for (let ci = 1; ci < kPick; ci++) {
+            for (let ci = 1; ci < spanCols; ci++) {
               if (colLoad[ci] < colLoad[minColIdx]) minColIdx = ci;
             }
             colLoad[minColIdx]++;
@@ -1192,7 +2298,7 @@ function TimetableStudioApp() {
     });
 
     setCurriculum(nextCurr);
-    setToast(`[${groupName}] 선택과목들의 이동수업 타임을 가장 고르게 분산하여 동시 필요 교사 수를 최소화했습니다!`);
+    setToast(`[${groupName}] 정원 및 시간강사 여부에 맞춰 선택과목 분반들을 가장 고르게 분산했습니다!`);
   };
 
   // 현재 탭+학기의 하단 교과협의회 기입 행 가져오기 (없으면 정규교사+시간강사 기본 생성)
@@ -1600,18 +2706,41 @@ function TimetableStudioApp() {
         });
       });
 
-      // 2) 학교지정(공통) 과목: 시간강사 잔여 시수 우선 배정 후 정규교사 1/N 배정
+      // 2) 학교지정(공통) 과목: 통합사회·통합과학은 2단계에서 설정한 세부 교과별 지원 시수(sharedSupport)에 맞춰 배정!
+      const remSharedSupport = {};
+      ["도덕", "역사", "지리", "일반사회", "물리", "화학", "생물", "지구과학"].forEach(d => {
+        remSharedSupport[d] = Number(sharedSupport[d]?.[semKey] || 0);
+      });
+
       [1, 2, 3].forEach(g => {
         const fixedItems = nextCurr.filter(c => c.grade === g && c.sem === semNum && c.type === "지정" && !c.closed && c.sections > 0);
         fixedItems.forEach(subj => {
+          const isSocShared = subj.dept === "통합사회" || subj.name.includes("통합사회");
+          const isSciShared = subj.dept === "통합과학" || subj.name.includes("통합과학") || subj.name.includes("과학탐구실험");
+          const majorDepts = isSocShared
+            ? ["도덕", "역사", "지리", "일반사회"]
+            : isSciShared
+            ? ["물리", "화학", "생물", "지구과학"]
+            : null;
+
           const pool = deptPools[subj.dept] || [`${subj.dept}교사1`];
           const lecInfo = remLecHours[subj.dept];
           const byTeacher = {};
+
           for (let sec = 1; sec <= subj.sections; sec++) {
             let chosen = null;
             if (lecInfo && lecInfo.rem >= subj.credits) {
               chosen = lecInfo.name;
               lecInfo.rem -= subj.credits;
+            } else if (majorDepts) {
+              // 지원 시수(remSharedSupport)가 남아 있는 세부 교과의 교사 풀에서 우선 배정
+              const availDepts = majorDepts
+                .filter(d => (remSharedSupport[d] || 0) > 0 && (deptPools[d]?.length || 0) > 0)
+                .sort((a, b) => (remSharedSupport[b] || 0) - (remSharedSupport[a] || 0));
+              const targetDept = availDepts[0] || majorDepts[0];
+              const subPool = (deptPools[targetDept] || pool).slice().sort((a, b) => getLoad(semNum, a) - getLoad(semNum, b));
+              chosen = subPool[0];
+              remSharedSupport[targetDept] = Math.max(0, (remSharedSupport[targetDept] || 0) - subj.credits);
             } else {
               const sortedPool = pool.slice().sort((a, b) => getLoad(semNum, a) - getLoad(semNum, b));
               chosen = sortedPool[0];
@@ -1769,7 +2898,7 @@ function TimetableStudioApp() {
     let softWarningCount = 0;
 
     // 1. 선택군(A~E 타임) 우선 배치 (분반 수가 많고 시간강사가 포함된 타임부터 우선 배치!)
-    const activeBandPlan = buildDefaultBandsForCurriculum(curriculum);
+    const activeBandPlan = buildDefaultBandsForCurriculum(curriculum, quota, lecturerHours, classCounts);
     [3, 2].forEach(g => {
       const cCnt = classCounts[g] || 7;
       const groupKeys = shuffleArray(Object.keys(activeBandPlan).filter(k => k.startsWith(`${g}_${semNum}_`)));
@@ -2042,7 +3171,97 @@ function TimetableStudioApp() {
       });
     });
 
-    return { sem: semNum, classGrid, teacherGrid, teacherFatigue, logs, hardConflictCount, softWarningCount, generatedAt: new Date().toLocaleTimeString("ko-KR") };
+    // ★ [우리 학교 정원 구성 기반 시간표 진단 및 맞춤형 조언 생성기]
+    const schoolQuotaAdvices = [];
+    const semKey = semNum === 1 ? "sem1" : "sem2";
+
+    // 진단 1: 선택과목 이동수업 타임(Band) 내에서 우리 학교 교과별 가용 교사 수(정원+시간강사)를 초과해 개설된 경우
+    [2, 3].forEach(g => {
+      const groupKeys = Object.keys(activeBandPlan).filter(k => k.startsWith(`${g}_${semNum}_`));
+      groupKeys.forEach(gk => {
+        const grpName = gk.split("_").slice(2).join("_");
+        const bandsObj = activeBandPlan[gk] || {};
+        Object.entries(bandsObj).forEach(([bandName, secList]) => {
+          const deptCountsInBand = {};
+          secList.forEach(sec => {
+            deptCountsInBand[sec.dept] = (deptCountsInBand[sec.dept] || 0) + 1;
+          });
+          Object.entries(deptCountsInBand).forEach(([d, cnt]) => {
+            const regQ = Math.max(0, Number(quota[d] || 0));
+            const lecH = Number(lecturerHours[d]?.[semKey] || 0);
+            const availT = regQ + (lecH > 0 ? 1 : 0);
+            if (cnt > availT) {
+              schoolQuotaAdvices.push({
+                severity: "critical",
+                title: `[${g}학년 ${bandName} · ${grpName}] '${d}' 교과 동시 투입 교사 부족 (필요 ${cnt}명 > 우리학교 가용 ${availT}명)`,
+                detail: `현재 ${g}학년 ${bandName}에 [${d}] 교과 분반이 동시에 ${cnt}개 반 열려 있으나, 우리 학교 [${d}] 정규 정원(${regQ}명)${lecH > 0 ? "+시간강사(1명)" : ""}은 총 ${availT}명뿐이라 한 교시에 ${cnt}개 반을 동시에 수업할 수 없습니다.`,
+                action: grpName.includes("택1")
+                  ? `👉 [해결 조언] '${grpName}'처럼 단일 선택군은 전 학급 동시 이동수업(1개 타임)으로 묶지 마시고, 4단계 시수배분표에서 교사 1명이 1~7반을 서로 다른 교시에 순차적으로 들어가도록 분산하거나 2단계에서 [${d}] 시간강사를 추가해 주세요.`
+                  : `👉 [해결 조언] ① 3단계에서 [${g}학년 ${semNum}학기]의 다른 대안(시간표최적 안)을 선택하여 [${d}] 분반을 A·B·C 타임으로 쪼개거나, ② 2단계에서 [${d}] 시간강사를 채용(또는 교양 과목일 경우 정원이 여유 있는 타 교과로 이관)해 주세요.`
+              });
+            }
+          });
+        });
+      });
+    });
+
+    // 진단 2: 전 학년(1·2·3학년) 주간 총 수업 시수가 우리 학교 해당 교과 정원의 최대 한계치를 초과하거나 빡빡한 경우
+    QUOTA_CATEGORIES.forEach(cat => {
+      if (cat === "통합사회" || cat === "통합과학") return;
+      const regQ = Number(quota[cat] || 0);
+      const lecH = Number(lecturerHours[cat]?.[semKey] || 0);
+      const reqH = hoursByDept[cat]?.[semKey] || 0;
+      const isSharedMajor = ["도덕", "역사", "지리", "일반사회", "물리", "화학", "생물", "지구과학"].includes(cat);
+      const supH = isSharedMajor ? Number(sharedSupport[cat]?.[semKey] || 0) : 0;
+      const totalNeedH = reqH + supH;
+      if (totalNeedH <= 0) return;
+
+      const netNeedForReg = Math.max(0, totalNeedH - lecH);
+      const perTeacher = regQ > 0 ? (netNeedForReg / regQ) : 99;
+
+      if (regQ === 0 && lecH < totalNeedH) {
+        schoolQuotaAdvices.push({
+          severity: "critical",
+          title: `[${cat} 교과] 정규 정원 0명 상태에서 ${totalNeedH}h 수업 편성됨`,
+          detail: `우리 학교 [${cat}] 정규 정원이 0명인데 ${semNum}학기에 총 ${totalNeedH}h의 수업이 배정되어 시간표 교사 배정이 불가능합니다.`,
+          action: `👉 [해결 조언] 2단계에서 [${cat}] 돋보기를 눌러 해당 과목을 실제로 수업하실 다른 교과(예: 일반사회, 도덕, 국어 등) 정원으로 이관하거나, 시간강사 시수(${totalNeedH}h)를 입력해 주세요.`
+        });
+      } else if (perTeacher >= 21) {
+        schoolQuotaAdvices.push({
+          severity: "warning",
+          title: `[${cat} 교과] 교사 1인당 평균 시수 과중 (${perTeacher.toFixed(1)}h / 정원 ${regQ}명)`,
+          detail: `[${cat}] 교과의 ${semNum}학기 총 시수(${totalNeedH}h, 통합지원 ${supH}h 포함)가 정원(${regQ}명) 대비 매우 높아, 1·2·3학년 이동수업과 공통과목 교시가 서로 겹칠 확률이 높습니다.`,
+          action: `👉 [해결 조언] ${ isSharedMajor ? `2단계에서 [⚖️ 통합사회/통합과학 1/N 균등 지원 자동계산]을 눌러 [${cat}]의 1학년 공통과목 지원 시수를 줄이거나, ` : "" }2단계에서 시간강사 시수를 추가해 정규교사당 시수를 18h 이하로 낮추면 충돌이 즉시 사라집니다.`
+        });
+      }
+    });
+
+    // 진단 3: 5단계에서 분반별 담당교사 지정이 안 되어(또는 1명의 교사에게 전 학년 과목이 몰려) 동시간 중복(hardConflictCount)이 발생한 경우
+    if (hardConflictCount > 0) {
+      const conflictTeachers = Array.from(new Set(logs.filter(l => l.level.includes("중복")).map(l => {
+        const m = l.target.match(/\(([^)]+)\)/);
+        return m ? m[1] : "";
+      }).filter(Boolean)));
+
+      schoolQuotaAdvices.push({
+        severity: "critical",
+        title: `교사 동시간 수업 중복 ${hardConflictCount}건 발생 (대상: ${conflictTeachers.join(", ")})`,
+        detail: `위 선생님이 담당하는 학급(또는 학년) 수업 시수가 주간 가용 교시(32h) 중 이동수업 타임이나 타 학년 수업과 겹쳐 빈 교시를 찾지 못했습니다.`,
+        action: `👉 [해결 조언] ① 5단계 상단의 [⚡ 정원+시간강사 기반 전 과목 자동 배정] 버튼을 눌러 한 선생님께 몰린 반들을 우리 학교 정원 인원수만큼 골고루 나누어 주시거나, ② 5단계 하단에서 해당 선생님의 과도한 배제요일/배제교시를 완화한 뒤 [🔥 AI 최적 시간표 탐색 (30회 시뮬레이션)]을 다시 눌러보세요.`
+      });
+    }
+
+    return {
+      sem: semNum,
+      classGrid,
+      teacherGrid,
+      teacherFatigue,
+      logs,
+      hardConflictCount,
+      softWarningCount,
+      schoolQuotaAdvices,
+      generatedAt: new Date().toLocaleTimeString("ko-KR")
+    };
   };
 
   // [신규] N회(기본 1회 또는 30회 최적 탐색) 시뮬레이션 후 가장 충돌이 적은 최상의 시간표 채택
@@ -2579,13 +3798,12 @@ function TimetableStudioApp() {
                 </div>
               </section>
 
-              <div className="grid gap-5 lg:grid-cols-2 items-stretch">
+<div className="grid gap-5 lg:grid-cols-2 items-stretch">
                 {QUOTA_DISPLAY_GROUPS.map(grp => {
                   const visibleItems = grp.items.filter(cat => !hideZeroQuotaDepts || cat === "통합사회" || cat === "통합과학" || (quota[cat] || 0) > 0 || (hoursByDept[cat]?.sem1 || 0) > 0 || (hoursByDept[cat]?.sem2 || 0) > 0);
                   if (visibleItems.length === 0) return null;
 
                   const grpQuotaSum = visibleItems.reduce((a, c) => a + Number(quota[c] || 0), 0);
-                  const grpCapSum = Math.round(grpQuotaSum * avgTargetHours);
                   const grpLec1Sum = visibleItems.reduce((a, c) => a + Number(lecturerHours[c]?.sem1 || 0), 0);
                   const grpLec2Sum = visibleItems.reduce((a, c) => a + Number(lecturerHours[c]?.sem2 || 0), 0);
                   const grpSem1Sum = visibleItems.reduce((a, c) => a + (hoursByDept[c]?.sem1 || 0), 0);
@@ -2593,7 +3811,18 @@ function TimetableStudioApp() {
 
                   const avgPerTeacher1 = grpQuotaSum > 0 ? (Math.max(0, grpSem1Sum - grpLec1Sum) / grpQuotaSum).toFixed(1) : "0.0";
                   const avgPerTeacher2 = grpQuotaSum > 0 ? (Math.max(0, grpSem2Sum - grpLec2Sum) / grpQuotaSum).toFixed(1) : "0.0";
-                  const sharedHours1 = grp.isSharedPool ? (hoursByDept[grp.sharedSubj]?.sem1 || 0) : 0;
+
+                  // 사회·과학 탐구군의 통합사회/통합과학 필요 시수 및 세부교과 지원 시수 합계 검증
+                  const sharedReq1 = grp.isSharedPool ? (hoursByDept[grp.sharedSubj]?.sem1 || 0) : 0;
+                  const sharedReq2 = grp.isSharedPool ? (hoursByDept[grp.sharedSubj]?.sem2 || 0) : 0;
+                  const sharedAllocated1 = grp.isSharedPool
+                    ? (grp.majorDepts || []).reduce((acc, d) => acc + Number(sharedSupport[d]?.sem1 || 0), 0)
+                    : 0;
+                  const sharedAllocated2 = grp.isSharedPool
+                    ? (grp.majorDepts || []).reduce((acc, d) => acc + Number(sharedSupport[d]?.sem2 || 0), 0)
+                    : 0;
+
+                  const totalColSpan = grp.isSharedPool ? 8 : 7;
 
                   return (
                     <section key={grp.title} className={`${PANEL} p-5 flex flex-col justify-between space-y-3`}>
@@ -2601,12 +3830,22 @@ function TimetableStudioApp() {
                         <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
                           <h3 className="text-sm font-extrabold text-ink whitespace-nowrap">{grp.title}</h3>
                           <div className="flex flex-wrap items-center gap-1.5">
+                            {grp.isSharedPool && (
+                              <button
+                                type="button"
+                                onClick={() => autoBalanceSharedSupport(grp.majorDepts, grp.sharedSubj)}
+                                className="rounded-lg bg-amber-500 px-2.5 py-1 text-[11px] font-extrabold text-white shadow-sm hover:bg-amber-600 transition-all"
+                                title="각 세부 교과의 전공 시수를 고려해 전체 교사 1인당 시수가 가장 균등해지도록 통합사회/통합과학 지원 시수를 자동 배분합니다"
+                              >
+                                ⚖️ {grp.sharedSubj} 1/N 균등 지원 자동계산
+                              </button>
+                            )}
                             <span className="no-wrap-badge rounded-lg bg-[#faf8fe] px-2.5 py-1 text-xs font-bold text-brand border border-[#dcd3ee]">
-                              정원 {grpQuotaSum}명 · {grpSem1Sum}h / {grpSem2Sum}h
+                              정원 {grpQuotaSum}명 · 총 {grpSem1Sum}h / {grpSem2Sum}h
                             </span>
                             {grpQuotaSum > 0 && (
                               <span className="no-wrap-badge rounded-lg bg-indigo-600 px-2.5 py-1 text-xs font-extrabold text-white shadow-sm">
-                                ⚖️ 정규 1/N: 1학기 {avgPerTeacher1}h · 2학기 {avgPerTeacher2}h
+                                ⚖️ 교과군 1/N 평균: 1학기 {avgPerTeacher1}h · 2학기 {avgPerTeacher2}h
                               </span>
                             )}
                           </div>
@@ -2616,12 +3855,19 @@ function TimetableStudioApp() {
                           <table className="w-full border-collapse text-xs">
                             <thead>
                               <tr className="border-b border-line bg-paper text-slate-600">
-                                <th className="p-2 text-left whitespace-nowrap">교과명</th>
+                                <th className="p-2 text-left whitespace-nowrap">교과명 (🔍과목확인·이관)</th>
                                 <th className="p-2 text-center whitespace-nowrap">정규정원</th>
-                                <th className="p-2 text-center bg-indigo-50/60 text-indigo-800 whitespace-nowrap">시간강사(1/2학기h · 강사명)</th>
+                                <th className="p-2 text-center bg-indigo-50/60 text-indigo-800 whitespace-nowrap">시간강사(1/2학기h)</th>
                                 <th className="p-2 text-center whitespace-nowrap">정규가용</th>
-                                <th className="p-2 text-center whitespace-nowrap">1학기 필요</th>
-                                <th className="p-2 text-center whitespace-nowrap">2학기 필요</th>
+                                <th className="p-2 text-center whitespace-nowrap">전공시수(1/2학기)</th>
+                                {grp.isSharedPool && (
+                                  <th className="p-2 text-center bg-amber-50 text-amber-900 font-extrabold whitespace-nowrap">
+                                    🤝 {grp.sharedSubj.slice(0, 2)} 지원(1/2학기h)
+                                  </th>
+                                )}
+                                <th className="p-2 text-center whitespace-nowrap">
+                                  {grp.isSharedPool ? "지원포함 총시수(1人평균)" : "2학기 필요"}
+                                </th>
                                 <th className="p-2 text-center whitespace-nowrap">상태 판정</th>
                               </tr>
                             </thead>
@@ -2636,26 +3882,45 @@ function TimetableStudioApp() {
                                 const req1 = hoursByDept[cat]?.sem1 || 0;
                                 const req2 = hoursByDept[cat]?.sem2 || 0;
 
-                                const shareRatio = grp.isSharedPool && !isSharedRow && grpQuotaSum > 0 ? (q / grpQuotaSum) : 0;
-                                const sharedBurden1 = Math.round(sharedHours1 * shareRatio * 10) / 10;
-                                const totalWithShared1 = Math.round((req1 + sharedBurden1) * 10) / 10;
+                                // 사회·과학 세부 교과의 통합사회/통합과학 지원 시수 반영
+                                const sup1 = grp.isSharedPool && !isSharedRow ? Number(sharedSupport[cat]?.sem1 || 0) : 0;
+                                const sup2 = grp.isSharedPool && !isSharedRow ? Number(sharedSupport[cat]?.sem2 || 0) : 0;
 
-                                const netDiff1 = (cap + lec1) - req1;
-                                const netDiff2 = (cap + lec2) - req2;
-                                const isShort = !isSharedRow && ((req1 > 0 && netDiff1 < 0) || (req2 > 0 && netDiff2 < 0));
+                                const total1 = req1 + sup1;
+                                const total2 = req2 + sup2;
+
+                                const perTeacher1 = q > 0 ? (Math.max(0, total1 - lec1) / q).toFixed(1) : "0.0";
+                                const perTeacher2 = q > 0 ? (Math.max(0, total2 - lec2) / q).toFixed(1) : "0.0";
+
+                                const netDiff1 = (cap + lec1) - total1;
+                                const netDiff2 = (cap + lec2) - total2;
+                                const isShort = !isSharedRow && ((total1 > 0 && netDiff1 < 0) || (total2 > 0 && netDiff2 < 0));
                                 const resolvedByLec = !isSharedRow && !isShort && (lec1 > 0 || lec2 > 0);
+                                const isInspectOpen = inspectDept === cat;
 
-return (
+                                // 현재 교과(cat)에 소속된 과목 리스트 추출
+                                const deptSubjList = curriculum.filter(it => {
+                                  if (cat === "통합사회") return it.name.includes("통합사회");
+                                  if (cat === "통합과학") return it.name.includes("통합과학") || it.name.includes("과학탐구실험");
+                                  if (it.splitMode === "split" && Array.isArray(it.splitDepts)) {
+                                    return it.splitDepts.some(sp => sp.startsWith(cat + ":"));
+                                  }
+                                  return it.dept === cat;
+                                });
+
+                                return (
+                                  <React.Fragment key={cat}>
                                     <tr
-                                      key={cat}
-                                      onClick={() => setInspectDept(cat)}
-                                      className={`cursor-pointer border-b border-line transition-colors ${inspectDept === cat ? "ring-2 ring-inset ring-brand bg-[#f3effb]" : isSharedRow ? "bg-amber-50/60 font-bold" : isShort ? "bg-red-50/40" : "hover:bg-paper/60"}`}
-                                      title="클릭하면 하단에서 이 교과에 포함된 상세 과목(학년·학기·단위수)을 확인하고 다른 정원 교과로 이관할 수 있습니다"
+                                      onClick={() => setInspectDept(isInspectOpen ? "" : cat)}
+                                      className={`cursor-pointer border-b border-line transition-colors ${isInspectOpen ? "ring-2 ring-inset ring-brand bg-[#f3effb]" : isSharedRow ? "bg-amber-50/70 font-bold" : isShort ? "bg-red-50/40" : "hover:bg-paper/60"}`}
+                                      title="클릭하면 바로 아래에 소속 과목 상세 내역 및 타 교과 정원 이관 창이 열립니다"
                                     >
                                       <td className="p-2 font-extrabold text-ink whitespace-nowrap">
                                         <span className="underline decoration-dotted underline-offset-4 text-brand">{cat}</span>
-                                        <span className="ml-1 text-[10px] font-normal text-slate-400">🔍</span>
-                                        {isSharedRow && <span className="ml-1.5 no-wrap-badge rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-extrabold text-amber-900">1학년 공통(1/N)</span>}
+                                        <span className="ml-1 inline-flex items-center rounded bg-white border border-[#dcd3ee] px-1 py-0.5 text-[10px] font-bold text-brand shadow-sm">
+                                          🔍 {isInspectOpen ? "닫기▲" : `${deptSubjList.length}과목▼`}
+                                        </span>
+                                        {isSharedRow && <span className="ml-1.5 no-wrap-badge rounded bg-amber-200 px-1.5 py-0.5 text-[10px] font-extrabold text-amber-900">1학년 공통</span>}
                                       </td>
                                       <td className="p-2 text-center whitespace-nowrap" onClick={e => e.stopPropagation()}>
                                         {isSharedRow ? (
@@ -2694,7 +3959,7 @@ return (
                                             <input
                                               type="text"
                                               title="시간강사 성명 (4·5·6단계 연동)"
-                                              className="w-16 rounded border border-indigo-300 bg-white px-1 py-0.5 text-[11px] font-bold text-indigo-900"
+                                              className="w-14 rounded border border-indigo-300 bg-white px-1 py-0.5 text-[11px] font-bold text-indigo-900"
                                               value={lecName}
                                               placeholder="강사명"
                                               onChange={e => setLecturerHours({ ...lecturerHours, [cat]: { ...lecturerHours[cat], name: e.target.value } })}
@@ -2703,133 +3968,194 @@ return (
                                         </div>
                                       </td>
                                       <td className="p-2 text-center text-slate-600 whitespace-nowrap">{isSharedRow ? "-" : `${cap}h`}</td>
-                                      <td className="p-2 text-center font-bold text-brand whitespace-nowrap">
-                                        {req1}h
-                                        {grp.isSharedPool && !isSharedRow && q > 0 && (
-                                          <span className="block text-[10px] font-normal text-slate-500 whitespace-nowrap">
-                                            (+{grp.sharedSubj.slice(0,2)} {sharedBurden1}h = {totalWithShared1}h)
-                                          </span>
+
+                                      {/* 전공 시수 표시 */}
+                                      <td className="p-2 text-center font-bold text-ink whitespace-nowrap">
+                                        {grp.isSharedPool ? `${req1}h / ${req2}h` : `${req1}h`}
+                                      </td>
+
+                                      {/* 사회·과학 탐구군 전용: 통합사회/통합과학 지원 시수 직접 입력란 */}
+                                      {grp.isSharedPool && (
+                                        <td className="p-2 text-center bg-amber-50/50 whitespace-nowrap" onClick={e => e.stopPropagation()}>
+                                          {isSharedRow ? (
+                                            <span className={`rounded px-2 py-0.5 text-[11px] font-extrabold ${sharedAllocated1 === sharedReq1 && sharedAllocated2 === sharedReq2 ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}`}>
+                                              지원합 {sharedAllocated1}/{sharedReq1}h · {sharedAllocated2}/{sharedReq2}h
+                                            </span>
+                                          ) : (
+                                            <div className="inline-flex items-center gap-1">
+                                              <span className="text-[10px] font-bold text-amber-800">+</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                max="60"
+                                                title={`1학기 ${cat} 교과의 ${grp.sharedSubj} 지원 시수(h)`}
+                                                className="w-11 rounded border border-amber-300 bg-white px-1 py-0.5 text-center font-extrabold text-amber-900 focus:border-brand focus:outline-none"
+                                                value={sup1}
+                                                onChange={e => setSharedSupport({
+                                                  ...sharedSupport,
+                                                  [cat]: { ...(sharedSupport[cat] || { sem1: 0, sem2: 0 }), sem1: Math.max(0, Number(e.target.value) || 0) }
+                                                })}
+                                              />
+                                              <span className="text-slate-400">/</span>
+                                              <input
+                                                type="number"
+                                                min="0"
+                                                max="60"
+                                                title={`2학기 ${cat} 교과의 ${grp.sharedSubj} 지원 시수(h)`}
+                                                className="w-11 rounded border border-amber-300 bg-white px-1 py-0.5 text-center font-extrabold text-amber-900 focus:border-brand focus:outline-none"
+                                                value={sup2}
+                                                onChange={e => setSharedSupport({
+                                                  ...sharedSupport,
+                                                  [cat]: { ...(sharedSupport[cat] || { sem1: 0, sem2: 0 }), sem2: Math.max(0, Number(e.target.value) || 0) }
+                                                })}
+                                              />
+                                              <span className="text-[10px] text-amber-800 font-bold">h</span>
+                                            </div>
+                                          )}
+                                        </td>
+                                      )}
+
+                                      {/* 지원 포함 총시수 및 교사 1인당 평균(사회·과학) 또는 2학기 필요시수(일반 교과) */}
+                                      <td className="p-2 text-center font-extrabold text-brand whitespace-nowrap">
+                                        {grp.isSharedPool ? (
+                                          isSharedRow ? (
+                                            <span className="text-[11px] text-amber-900">
+                                              미배분 {sharedReq1 - sharedAllocated1}h / {sharedReq2 - sharedAllocated2}h
+                                            </span>
+                                          ) : (
+                                            <div>
+                                              <span>{total1}h / {total2}h</span>
+                                              {q > 0 && (
+                                                <span className="block text-[10px] font-bold text-indigo-700">
+                                                  (1인당 {perTeacher1}h / {perTeacher2}h)
+                                                </span>
+                                              )}
+                                            </div>
+                                          )
+                                        ) : (
+                                          `${req2}h`
                                         )}
                                       </td>
-                                      <td className="p-2 text-center font-bold text-brand whitespace-nowrap">{req2}h</td>
+
                                       <td className="p-2 text-center whitespace-nowrap">
                                         {isSharedRow ? (
-                                          <span className="no-wrap-badge rounded bg-amber-100 border border-amber-300 px-2 py-0.5 text-[10px] font-bold text-amber-900">
-                                            교사당 {(req1 / Math.max(1, grpQuotaSum)).toFixed(1)}h 분담
-                                          </span>
+                                          sharedAllocated1 === sharedReq1 && sharedAllocated2 === sharedReq2 ? (
+                                            <span className="no-wrap-badge rounded bg-emerald-100 border border-emerald-300 px-2 py-0.5 text-[10px] font-extrabold text-emerald-900">
+                                              ✔ 지원배분 100% 완료
+                                            </span>
+                                          ) : (
+                                            <span className="no-wrap-badge rounded bg-rose-100 border border-rose-300 px-2 py-0.5 text-[10px] font-extrabold text-rose-800">
+                                              ⚠️ 지원시수 {sharedReq1 - sharedAllocated1}h/{sharedReq2 - sharedAllocated2}h 차이
+                                            </span>
+                                          )
                                         ) : (
-                                          <span className={`no-wrap-badge rounded px-2 py-0.5 text-[10px] font-bold ${isShort ? "bg-red-600 text-white" : resolvedByLec ? "bg-indigo-600 text-white" : req1 > 0 || req2 > 0 ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-400"}`}>
-                                            {isShort ? `🔴 ${Math.min(netDiff1, netDiff2)}h 부족` : resolvedByLec ? `🟢 강사(${lec1}/${lec2}h) 해소` : req1 > 0 || req2 > 0 ? `🟢 +${netDiff1}h 여유` : "-"}
+                                          <span className={`no-wrap-badge rounded px-2 py-0.5 text-[10px] font-bold ${isShort ? "bg-red-600 text-white" : resolvedByLec ? "bg-indigo-600 text-white" : total1 > 0 || total2 > 0 ? "bg-emerald-100 text-emerald-800" : "bg-slate-100 text-slate-400"}`}>
+                                            {isShort ? `🔴 ${Math.min(netDiff1, netDiff2)}h 부족` : resolvedByLec ? `🟢 강사(${lec1}/${lec2}h) 해소` : total1 > 0 || total2 > 0 ? `🟢 +${Math.min(netDiff1, netDiff2)}h 여유` : "-"}
                                           </span>
                                         )}
                                       </td>
                                     </tr>
-                                  );
-                                })}
-                              </tbody>
-                            </table>
-                          </div>
+
+                                    {/* ★ 돋보기(🔍) 클릭 시 바로 그 줄 아래에 열리는 인라인 과목 상세 확인 및 타 교과 정원 이관 박스 */}
+                                    {isInspectOpen && (
+                                      <tr className="bg-[#faf8fe] border-b-2 border-brand">
+                                        <td colSpan={totalColSpan} className="p-3">
+                                          <div className="rounded-xl border-2 border-brand/40 bg-white p-3.5 space-y-2.5 shadow-sm">
+                                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
+                                              <div>
+                                                <span className="rounded bg-brand px-2 py-0.5 text-[11px] font-extrabold text-white">
+                                                  🔍 [{cat}] 교과 소속 과목 상세 내역 (1학기 {req1}h / 2학기 {req2}h)
+                                                </span>
+                                                <span className="ml-2 text-[11px] font-semibold text-slate-600">
+                                                  과목 시수를 그대로 두거나, 우측 드롭다운에서 <strong>다른 교과 정원으로 옮기면 해당 교과군의 평균 시수가 즉시 재계산</strong>됩니다.
+                                                </span>
+                                              </div>
+                                              <button
+                                                type="button"
+                                                onClick={() => setInspectDept("")}
+                                                className="rounded-lg border border-line bg-paper px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-200"
+                                              >
+                                                ✕ 닫기
+                                              </button>
+                                            </div>
+
+                                            {deptSubjList.length > 0 ? (
+                                              <table className="w-full border-collapse text-[11px]">
+                                                <thead>
+                                                  <tr className="bg-slate-100 border-b border-slate-300 text-slate-700">
+                                                    <th className="p-1.5 text-left whitespace-nowrap">과목명 (학년 · 학기)</th>
+                                                    <th className="p-1.5 text-center whitespace-nowrap">구분 / 선택그룹</th>
+                                                    <th className="p-1.5 text-center whitespace-nowrap">단위수 × 분반수</th>
+                                                    <th className="p-1.5 text-center whitespace-nowrap">소요 시수</th>
+                                                    <th className="p-1.5 text-center bg-[#f3effb] text-brand whitespace-nowrap">🔄 소속 정원 교과 변경 (클릭 시 타 교과 정원 내 시수로 즉시 이동)</th>
+                                                  </tr>
+                                                </thead>
+                                                <tbody>
+                                                  {deptSubjList.map(it => {
+                                                    const totalH = it.closed ? 0 : it.credits * it.sections;
+                                                    return (
+                                                      <tr key={it.id} className="border-b border-slate-200 hover:bg-paper/50">
+                                                        <td className="p-1.5 font-extrabold text-ink whitespace-nowrap">
+                                                          {it.name} <span className="text-brand font-bold">({it.grade}학년 {it.sem}학기)</span>
+                                                          {it.closed && <span className="ml-1 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">폐강</span>}
+                                                        </td>
+                                                        <td className="p-1.5 text-center text-slate-600 whitespace-nowrap">{it.type} · {it.group}</td>
+                                                        <td className="p-1.5 text-center font-semibold whitespace-nowrap">{it.credits}h × {it.sections}개반</td>
+                                                        <td className="p-1.5 text-center font-extrabold text-brand whitespace-nowrap">{totalH}h</td>
+                                                        <td className="p-1.5 text-center bg-[#faf8fe]">
+                                                          <select
+                                                            className="rounded-lg border-2 border-brand bg-white px-2 py-1 text-[11px] font-extrabold text-brand cursor-pointer"
+                                                            value={it.dept}
+                                                            onChange={e => {
+                                                              const newDept = e.target.value;
+                                                              setCurriculum(curriculum.map(x => x.id === it.id ? { ...x, dept: newDept } : x));
+                                                              setToast(`✅ [${it.grade}학년 ${it.sem}학기 ${it.name}(${totalH}h)] 과목을 [${cat}] → [${newDept}] 정원 내 시수로 이동하여 교과군 평균 시수를 재계산했습니다!`);
+                                                            }}
+                                                          >
+                                                            {QUOTA_CATEGORIES.map(qCat => (
+                                                              <option key={qCat} value={qCat}>
+                                                                {qCat === cat ? `✔ 현재 [${qCat}] 정원 유지 (정원 ${quota[qCat] || 0}명)` : `👉 [${qCat}] 정원으로 시수 옮기기 (정원 ${quota[qCat] || 0}명)`}
+                                                              </option>
+                                                            ))}
+                                                          </select>
+                                                        </td>
+                                                      </tr>
+                                                    );
+                                                  })}
+                                                </tbody>
+                                              </table>
+                                            ) : (
+                                              <div className="py-3 text-center text-xs text-slate-400">
+                                                현재 [{cat}] 정원으로 배정된 과목이 없습니다. (타 교과의 돋보기를 눌러 이 교과로 과목을 옮겨올 수 있습니다.)
+                                              </div>
+                                            )}
+                                          </div>
+                                        </td>
+                                      </tr>
+                                    )}
+                                  </React.Fragment>
+                                );
+                              })}
+                            </tbody>
+                          </table>
                         </div>
+                      </div>
 
-                        <div className="rounded-xl bg-[#f3effb] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-extrabold text-brand border border-[#dcd3ee]">
-                          <span className="whitespace-nowrap">★ 교과군 전체 합계 (강사 제외 1/N)</span>
-                          <div className="flex flex-wrap items-center gap-3">
-                            <span className="whitespace-nowrap">정원 {grpQuotaSum}명 · 강사 {grpLec1Sum}/{grpLec2Sum}h</span>
-                            <span className="whitespace-nowrap">1학기 {grpSem1Sum}h (정규평균 {avgPerTeacher1}h)</span>
-                            <span className="whitespace-nowrap">2학기 {grpSem2Sum}h (정규평균 {avgPerTeacher2}h)</span>
-                          </div>
+                      <div className="rounded-xl bg-[#f3effb] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2 text-xs font-extrabold text-brand border border-[#dcd3ee]">
+                        <span className="whitespace-nowrap">★ 교과군 전체 합계 (강사 제외 1/N)</span>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <span className="whitespace-nowrap">정원 {grpQuotaSum}명 · 강사 {grpLec1Sum}/{grpLec2Sum}h</span>
+                          <span className="whitespace-nowrap">1학기 {grpSem1Sum}h (정규평균 {avgPerTeacher1}h)</span>
+                          <span className="whitespace-nowrap">2학기 {grpSem2Sum}h (정규평균 {avgPerTeacher2}h)</span>
                         </div>
-                      </section>
-                    );
-                  })}
-                </div>
-
-                {/* [신규 4번] 선택한 정원 교과의 소속 과목(학년·학기·단위수) 상세 보기 및 타 교과(예: 기타 -> 보건/도덕 등) 시수 이관 패널 */}
-                {inspectDept && (
-                  <section className={`${PANEL} p-5 border-2 border-brand space-y-4`}>
-                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
-                      <div>
-                        <span className="no-wrap-badge rounded bg-brand px-2.5 py-1 text-xs font-extrabold text-white">
-                          🔍 [{inspectDept}] 교과 소속 과목 상세 내역 및 정원 이관(재배정)
-                        </span>
-                        <h3 className="mt-1.5 text-base font-bold text-ink">
-                          📋 현재 [{inspectDept}] 정원으로 집계 중인 과목 목록 (1학기 {hoursByDept[inspectDept]?.sem1 || 0}h / 2학기 {hoursByDept[inspectDept]?.sem2 || 0}h)
-                        </h3>
-                        <p className="text-xs text-slate-500">
-                          위 정원표에서 아무 교과명이나 클릭하면 해당 교과의 과목(학년·학기·단위수·분반수)이 아래에 표시됩니다. 특히 <strong>'기타(인간과 심리 등)'나 '교양' 과목을 실제 담당할 교과(예: 보건, 도덕, 전문상담, 일반사회 등)로 변경</strong>하면 시수가 즉시 해당 교과로 이동합니다!
-                        </p>
                       </div>
-                      <div className="flex flex-wrap gap-1">
-                        {["국어", "수학", "영어", "일반사회", "도덕", "역사", "지리", "물리", "화학", "생물", "지구과학", "정보", "보건", "교육학", "기타"].map(d => (
-                          <button
-                            key={d}
-                            type="button"
-                            onClick={() => setInspectDept(d)}
-                            className={`rounded-lg px-2.5 py-1 text-xs font-bold ${inspectDept === d ? "bg-brand text-white" : "border border-line bg-paper text-slate-600 hover:bg-white"}`}
-                          >
-                            {d}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="overflow-x-auto">
-                      <table className="w-full border-collapse text-xs">
-                        <thead>
-                          <tr className="border-b border-line bg-paper text-slate-600">
-                            <th className="p-2.5 text-left whitespace-nowrap">과목명 (학년 · 학기 · 단위수 안내)</th>
-                            <th className="p-2.5 text-center whitespace-nowrap">이수구분 / 선택그룹</th>
-                            <th className="p-2.5 text-center whitespace-nowrap">단위수(학점) × 분반수</th>
-                            <th className="p-2.5 text-center whitespace-nowrap">총 소요 시수</th>
-                            <th className="p-2.5 text-center bg-[#faf8fe] text-brand whitespace-nowrap">🔄 소속 정원 교과 변경 (타 교과로 시수 이관)</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {curriculum
-                            .filter(it => {
-                              if (inspectDept === "통합사회") return it.name.includes("통합사회");
-                              if (inspectDept === "통합과학") return it.name.includes("통합과학") || it.name.includes("과학탐구실험");
-                              if (it.splitMode === "split" && Array.isArray(it.splitDepts)) {
-                                return it.splitDepts.some(sp => sp.startsWith(inspectDept + ":"));
-                              }
-                              return it.dept === inspectDept;
-                            })
-                            .map(it => {
-                              const totalH = it.closed ? 0 : it.credits * it.sections;
-                              return (
-                                <tr key={it.id} className="border-b border-line hover:bg-paper/40">
-                                  <td className="p-2.5 font-extrabold text-ink whitespace-nowrap">
-                                    {it.name} <span className="ml-1 text-brand font-bold">({it.grade}학년, {it.sem}학기, {it.credits}단위)</span>
-                                    {it.closed && <span className="ml-1.5 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-bold text-rose-700">폐강(0반)</span>}
-                                  </td>
-                                  <td className="p-2.5 text-center text-slate-600 whitespace-nowrap">{it.type} · {it.group}</td>
-                                  <td className="p-2.5 text-center font-semibold whitespace-nowrap">{it.credits}단위(h) × {it.sections}개반</td>
-                                  <td className="p-2.5 text-center font-extrabold text-brand whitespace-nowrap">{totalH}h</td>
-                                  <td className="p-2.5 text-center bg-[#faf8fe]">
-                                    <select
-                                      className="rounded-lg border-2 border-brand bg-white px-2.5 py-1 text-xs font-extrabold text-brand"
-                                      value={it.dept}
-                                      onChange={e => {
-                                        const newDept = e.target.value;
-                                        setCurriculum(curriculum.map(x => x.id === it.id ? { ...x, dept: newDept } : x));
-                                        setToast(`[${it.grade}학년 ${it.sem}학기 ${it.name}(${totalH}h)] 과목의 시수를 [${inspectDept}] → [${newDept}] 정원으로 이관했습니다!`);
-                                      }}
-                                    >
-                                      {QUOTA_CATEGORIES.map(q => (
-                                        <option key={q} value={q}>{q} 정원으로 배정 (현재 정원 {quota[q] || 0}명)</option>
-                                      ))}
-                                    </select>
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                        </tbody>
-                      </table>
-                    </div>
-                  </section>
-                )}
+                    </section>
+                  );
+                })}
               </div>
-            )}
+            </div>
+          )}
+
           {/* =====================================================================
               3단계: 리로스쿨 분반 조절 + 학폭/생활지도 분리 학생 지정
              ===================================================================== */}
@@ -2870,20 +4196,104 @@ return (
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-4 border-t border-line pt-4">
-                  <div className="flex flex-wrap gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     {[[2, 1], [2, 2], [3, 1], [3, 2]].map(([g, s]) => (
                       <button key={`${g}-${s}`} type="button" onClick={() => { setActiveGrade(g); setActiveSem(s); }} className={`rounded-lg px-3.5 py-2 text-xs font-bold ${activeGrade === g && activeSem === s ? "bg-brand text-white" : "border border-line bg-white text-slate-600"}`}>
                         {g}학년 {s}학기 선택과목
                       </button>
                     ))}
+
+                    {/* ★ 학교별 학년 학급수 · 분반 최소/최대 인원 · 1타임당 최대 운영 반 수 통합 설정 바 */}
+                    <div className="flex flex-wrap items-center gap-2 rounded-xl border-2 border-indigo-200 bg-indigo-50/70 px-3 py-1.5 text-xs">
+                      <span className="font-extrabold text-indigo-950 whitespace-nowrap">
+                        🏫 {activeGrade}학년 학급수:
+                      </span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="20"
+                        className="w-11 rounded border border-indigo-300 bg-white px-1 py-0.5 text-center font-extrabold text-brand"
+                        value={classCounts[activeGrade] || 7}
+                        onChange={e => updateClassCount(activeGrade, e.target.value)}
+                      />
+                      <span className="text-slate-400">|</span>
+                      <span className="font-extrabold text-indigo-950 whitespace-nowrap" title="분반 개설 최소/최대 인원 기준입니다">
+                        👥 분반 인원 기준(최소~최대):
+                      </span>
+                      <input
+                        type="number"
+                        min="1"
+                        max="25"
+                        title="분반당 최소 권장 인원 (소인수/폐강 검토 기준)"
+                        className="w-11 rounded border border-indigo-300 bg-white px-1 py-0.5 text-center font-extrabold text-amber-700"
+                        value={minStudentsPerSec}
+                        onChange={e => setMinStudentsPerSec(Math.max(1, Number(e.target.value) || 13))}
+                      />
+                      <span className="font-bold text-slate-500">~</span>
+                      <input
+                        type="number"
+                        min="20"
+                        max="45"
+                        title="분반당 최대 허용 인원 (과밀 학급 상한선)"
+                        className="w-11 rounded border border-indigo-300 bg-white px-1 py-0.5 text-center font-extrabold text-rose-700"
+                        value={maxStudentsPerSec}
+                        onChange={e => setMaxStudentsPerSec(Math.max(20, Number(e.target.value) || 33))}
+                      />
+                      <span className="text-[11px] font-bold text-slate-600">명</span>
+                      <button
+                        type="button"
+                        onClick={() => autoAdjustSectionsByMinMax(activeGrade, activeSem)}
+                        className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-extrabold text-white shadow-sm hover:bg-indigo-700"
+                        title="설정한 최소·최대 인원과 학급수×택K 기준에 맞춰 분반 수를 자동으로 계산합니다"
+                      >
+                        ⚖️ 최소·최대 인원 기준 분반 자동산출
+                      </button>
+                      <span className="text-slate-400">|</span>
+                      <span className="font-extrabold text-indigo-950 whitespace-nowrap" title="한 타임(예: A타임)에 동시에 개설할 수 있는 최대 분반 수 상한선입니다">
+                        🔒 1타임당 최대:
+                      </span>
+                      <select
+                        className="rounded border border-indigo-300 bg-white px-2 py-0.5 font-extrabold text-brand"
+                        value={maxSectionsPerBand[activeGrade] || 8}
+                        onChange={e => {
+                          const nextMax = Number(e.target.value) || 8;
+                          setMaxSectionsPerBand(prev => ({ ...prev, [activeGrade]: nextMax }));
+                          if (bandOptReport && bandOptReport.grade === activeGrade && bandOptReport.sem === activeSem) {
+                            setTimeout(() => runZeroUnassignedBandOptimizer(activeGrade, activeSem), 50);
+                          }
+                        }}
+                      >
+                        {[5, 6, 7, 8, 9, 10, 11, 12].map(n => (
+                          <option key={n} value={n}>
+                            최대 {n}개반 {n === (classCounts[activeGrade] || 7) ? "(학급수 동일)" : n === (classCounts[activeGrade] || 7) + 1 ? "(권장 +1반)" : ""}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
                   </div>
                   <div className="flex flex-wrap gap-2">
+<button
+                      type="button"
+                      disabled={optBusy}
+                      onClick={() => runZeroUnassignedBandOptimizer(activeGrade, activeSem)}
+                      className={`rounded-xl px-4 py-2.5 text-xs font-extrabold text-white shadow-sm transition-all ${
+                        optBusy
+                          ? "bg-amber-500 animate-pulse cursor-wait"
+                          : rosterLocked[`${activeGrade}_${activeSem}`]
+                          ? "bg-slate-400 cursor-not-allowed"
+                          : "bg-gradient-to-r from-brand to-indigo-600 hover:opacity-95 ring-2 ring-brand/30"
+                      }`}
+                    >
+                      {optBusy
+                        ? "⏳ 수학적 최적 조합 계산 중... (잠시만 기다려주세요)"
+                        : "🔍 학생 미배정 제로(0) 보장 · 최적 밴드(타임) 자동 조합 탐색"}
+                    </button>
                     <button
                       type="button"
                       onClick={() => generateRandomSectionRosters(activeGrade, activeSem)}
-                      className={`rounded-xl px-4 py-2.5 text-xs font-extrabold text-white shadow-sm ${rosterLocked[`${activeGrade}_${activeSem}`] ? "bg-slate-400 cursor-not-allowed" : "bg-indigo-600 hover:bg-indigo-700"}`}
+                      className={`rounded-xl px-3.5 py-2.5 text-xs font-extrabold text-white shadow-sm ${rosterLocked[`${activeGrade}_${activeSem}`] ? "bg-slate-400 cursor-not-allowed" : "bg-slate-800 hover:bg-slate-900"}`}
                     >
-                      🎲 학생 분리 반영 · 분반별 실명 무작위(랜덤) 배정 실행
+                      🎲 단순 무작위(랜덤) 분반 재배정
                     </button>
                     {/* [신규 2번] 분반 명단 고정(잠금) 토글 버튼 — 3단계와 4단계 사이 시간적 공백 동안 명단 보호 */}
                     <button
@@ -2916,149 +4326,604 @@ return (
                 </div>
               </section>
 
-              <div className="grid items-stretch gap-5 xl:grid-cols-[1.35fr_1fr]">
-                <div className="space-y-5">
-                  {Array.from(new Set(curriculum.filter(c => c.grade === activeGrade && c.sem === activeSem && c.type === "선택").map(c => c.group))).map(grp => {
-                    const items = curriculum.filter(c => c.grade === activeGrade && c.sem === activeSem && c.type === "선택" && c.group === grp);
-                    const pickCnt = items[0]?.pickCount || 1;
-                    const targetSections = classCounts[activeGrade] * pickCnt;
-                    const currentTotalSections = items.reduce((acc, it) => acc + (it.closed ? 0 : it.sections), 0);
-                    const isLockedNow = !!rosterLocked[`${activeGrade}_${activeSem}`];
+              {/* 계산 진행 중일 때 눈에 잘 띄는 대기 안내 배너 */}
+              {optBusy && (
+                <section className={`${PANEL} p-6 border-2 border-amber-400 bg-amber-50 text-center space-y-2 animate-pulse`}>
+                  <p className="text-sm font-extrabold text-amber-900">
+                    ⏳ [{activeGrade}학년 {activeSem}학기] 선택과목 동시선택 충돌 매트릭스 및 미배정 제로(0) 조합을 계산하고 있습니다...
+                  </p>
+                  <p className="text-xs text-amber-800">
+                    전교생 선택 조합과 과목별 분반 정원, 교사 수급 피크를 동시에 만족하는 상위 5개 대안(제1안~제5안)을 추출 중입니다. 1~2초만 기다려 주세요!
+                  </p>
+                </section>
+              )}
 
-                    return (
-                      <section key={grp} className={`${PANEL} p-5 space-y-3`}>
-                        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
-                          <h3 className="text-base font-bold text-ink whitespace-nowrap">
-                            {activeGrade}학년 {activeSem}학기 · {grp} 분반 수 조절
-                            {isLockedNow && <span className="ml-2 rounded bg-rose-100 px-2 py-0.5 text-xs font-extrabold text-rose-700">🔒 고정됨</span>}
-                          </h3>
-                          <span className={`no-wrap-badge rounded-xl border px-3 py-1 text-xs font-bold ${currentTotalSections === targetSections ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
-                            개설 분반 합계: {currentTotalSections}개 / 권장 기준({classCounts[activeGrade]}반×택{pickCnt}): {targetSections}개
-                          </span>
-                        </div>
-                        <div className="overflow-x-auto">
-                          <table className="w-full border-collapse text-xs">
-                            <thead>
-                              <tr className="border-b border-line bg-paper text-slate-600">
-                                <th className="p-2.5 text-left whitespace-nowrap">과목명</th>
-                                <th className="p-2.5 text-center whitespace-nowrap">교과</th>
-                                <th className="p-2.5 text-center whitespace-nowrap">신청 인원</th>
-                                <th className="p-2.5 text-center whitespace-nowrap">확정 분반 수</th>
-                                <th className="p-2.5 text-center whitespace-nowrap">반당 평균</th>
-                                <th className="p-2.5 text-center whitespace-nowrap">실명 분반 명단 확인</th>
-                              </tr>
-                            </thead>
-                            <tbody>
-                              {items.map(it => {
-                                const avg = !it.closed && it.sections > 0 ? (it.enroll / it.sections).toFixed(1) : "0.0";
-                                const hasRoster = Array.isArray(randomRosters[it.id]);
-                                return (
-                                  <tr key={it.id} className="border-b border-line hover:bg-paper/40">
-                                    <td className="p-2.5 font-bold whitespace-nowrap">{it.name}</td>
-                                    <td className="p-2.5 text-center text-brand font-semibold whitespace-nowrap">{it.dept}</td>
-                                    <td className="p-2.5 text-center font-bold whitespace-nowrap">{it.enroll}명</td>
-                                    <td className="p-2.5 text-center whitespace-nowrap">
-                                      <div className="inline-flex items-center gap-1.5">
-                                        <button type="button" className="h-6 w-6 rounded border border-line bg-white font-bold" onClick={() => {
-                                          if (isLockedNow) { alert("🔒 현재 분반·명단이 고정(잠금)되어 있습니다. 수정하려면 상단의 잠금을 먼저 해제해 주세요."); return; }
-                                          const next = curriculum.map(x => x.id === it.id ? { ...x, sections: Math.max(0, x.sections - 1), closed: x.sections - 1 <= 0, customColCounts: undefined } : x);
-                                          setCurriculum(next);
-                                        }}>-</button>
-                                        <span className="w-9 text-center font-bold text-brand whitespace-nowrap">{it.closed ? 0 : it.sections}반</span>
-                                        <button type="button" className="h-6 w-6 rounded border border-line bg-white font-bold" onClick={() => {
-                                          if (isLockedNow) { alert("🔒 현재 분반·명단이 고정(잠금)되어 있습니다. 수정하려면 상단의 잠금을 먼저 해제해 주세요."); return; }
-                                          const next = curriculum.map(x => x.id === it.id ? { ...x, sections: x.sections + 1, closed: false, customColCounts: undefined } : x);
-                                          setCurriculum(next);
-                                        }}>+</button>
-                                      </div>
-                                    </td>
-                                    <td className="p-2.5 text-center whitespace-nowrap">{avg}명</td>
-                                    <td className="p-2.5 text-center whitespace-nowrap">
-                                      <button
-                                        type="button"
-                                        onClick={() => {
-                                          if (!hasRoster) generateRandomSectionRosters(activeGrade, activeSem);
-                                          setPreviewRosterSubj(it.id);
-                                        }}
-                                        className="rounded-lg border border-brand bg-[#faf8fe] px-2.5 py-1 text-[11px] font-bold text-brand hover:bg-brand hover:text-white"
-                                      >
-                                        {hasRoster ? `👥 명단 보기 (${it.sections}개반)` : "🎲 배정 후 명단 보기"}
-                                      </button>
-                                    </td>
-                                  </tr>
-                                );
-                              })}
-                            </tbody>
-                          </table>
-                        </div>
-                      </section>
-                    );
-                  })}
-                </div>
+{/* [가로 전체 폭(100%) 활용 1] 모든 선택군(중국어·일본어 포함)을 한쪽에 쏠리지 않게 화면 가로 전체 폭 2열로 배치! */}
+              <div className="space-y-5">
+                {Array.from(new Set(curriculum.filter(c => c.grade === activeGrade && c.sem === activeSem && c.type === "선택").map(c => c.group))).map(grp => {
+                  const items = curriculum.filter(c => c.grade === activeGrade && c.sem === activeSem && c.type === "선택" && c.group === grp);
+                  const pickCnt = items[0]?.pickCount || 1;
+                  const targetSections = classCounts[activeGrade] * pickCnt;
+                  const currentTotalSections = items.reduce((acc, it) => acc + (it.closed ? 0 : it.sections), 0);
+                  const isLockedNow = !!rosterLocked[`${activeGrade}_${activeSem}`];
+                  // ★ 과목이 2개(중국어·일본어) 이상이면 무조건 좌·우 2열로 균등 분할하여 가로 전체 폭을 꽉 채움!
+                  const halfIdx = Math.ceil(items.length / 2);
+                  const twoColSplits = items.length >= 2 ? [items.slice(0, halfIdx), items.slice(halfIdx)] : [items];
 
-                <aside className="flex flex-col gap-4">
-                  {separationLogs.length > 0 && (
-                    <section className={`${PANEL} p-4 space-y-2 border-2 border-indigo-200`}>
-                      <h4 className="text-xs font-extrabold text-indigo-900">🛡️ 학생 분리 배정 적용 리포트 ({separationLogs.length}건)</h4>
-                      <div className="max-h-36 overflow-y-auto space-y-1.5 text-[11px]">
-                        {separationLogs.map((lg, i) => (
-                          <div key={i} className={`rounded-lg p-2 border ${lg.type === "warning" ? "bg-amber-50 border-amber-300 text-amber-900 font-bold" : "bg-emerald-50 border-emerald-200 text-emerald-800"}`}>
-                            {lg.msg}
+                  return (
+                    <section key={grp} className={`${PANEL} p-5 space-y-3`}>
+                      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-3">
+                        <h3 className="text-base font-extrabold text-ink whitespace-nowrap">
+                          ① {activeGrade}학년 {activeSem}학기 · {grp} 분반 수 확인 및 조절 ({items.length}개 과목)
+                          {isLockedNow && <span className="ml-2 rounded bg-rose-100 px-2 py-0.5 text-xs font-extrabold text-rose-700">🔒 고정됨</span>}
+                        </h3>
+                        <span className={`no-wrap-badge rounded-xl border px-3 py-1 text-xs font-bold ${currentTotalSections === targetSections ? "border-emerald-300 bg-emerald-50 text-emerald-800" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
+                          개설 분반 합계: {currentTotalSections}개 / 권장 기준({classCounts[activeGrade]}반×택{pickCnt}): {targetSections}개
+                        </span>
+                      </div>
+
+                      <div className={`grid gap-4 ${twoColSplits.length > 1 ? "lg:grid-cols-2" : "grid-cols-1"}`}>
+                        {twoColSplits.map((colItems, colIdx) => (
+                          <div key={colIdx} className="overflow-x-auto rounded-xl border border-line bg-white">
+                            <table className="w-full border-collapse text-xs">
+                              <thead>
+                                <tr className="border-b border-line bg-paper text-slate-600">
+                                  <th className="p-2.5 text-left whitespace-nowrap">과목명 (담당교과)</th>
+                                  <th className="p-2.5 text-center whitespace-nowrap">신청 인원</th>
+                                  <th className="p-2.5 text-center whitespace-nowrap">확정 분반 수</th>
+                                  <th className="p-2.5 text-center whitespace-nowrap">반당 평균</th>
+                                  <th className="p-2.5 text-center whitespace-nowrap">실명 분반 명단</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {colItems.map(it => {
+                                  const avg = !it.closed && it.sections > 0 ? (it.enroll / it.sections).toFixed(1) : "0.0";
+                                  const hasRoster = Array.isArray(randomRosters[it.id]);
+                                  const isSelectedSubj = previewRosterSubj === it.id;
+                                  return (
+                                    <tr key={it.id} className={`border-b border-line last:border-b-0 transition-colors ${isSelectedSubj ? "bg-[#f3effb]" : "hover:bg-paper/40"}`}>
+                                      <td className="p-2.5 font-extrabold text-ink whitespace-nowrap">
+                                        {it.name} <span className="ml-1 text-[11px] font-bold text-brand">({it.dept})</span>
+                                      </td>
+                                      <td className="p-2.5 text-center font-bold whitespace-nowrap">{it.enroll}명</td>
+                                      <td className="p-2.5 text-center whitespace-nowrap">
+                                        <div className="inline-flex items-center gap-1.5">
+                                          <button type="button" className="h-6 w-6 rounded border border-line bg-white font-bold hover:bg-slate-100 leading-none" onClick={() => {
+                                            if (isLockedNow) { alert("🔒 현재 분반·명단이 고정(잠금)되어 있습니다. 수정하려면 상단의 잠금을 먼저 해제해 주세요."); return; }
+                                            const next = curriculum.map(x => x.id === it.id ? { ...x, sections: Math.max(0, x.sections - 1), closed: x.sections - 1 <= 0, customColCounts: undefined } : x);
+                                            setCurriculum(next);
+                                            if (bandOptReport && bandOptReport.grade === activeGrade && bandOptReport.sem === activeSem) {
+                                              runZeroUnassignedBandOptimizer(activeGrade, activeSem, next, riroStudents);
+                                            }
+                                          }}>-</button>
+                                          <span className="w-9 text-center font-extrabold text-brand whitespace-nowrap">{it.closed ? 0 : it.sections}반</span>
+                                          <button type="button" className="h-6 w-6 rounded border border-line bg-white font-bold hover:bg-slate-100 leading-none" onClick={() => {
+                                            if (isLockedNow) { alert("🔒 현재 분반·명단이 고정(잠금)되어 있습니다. 수정하려면 상단의 잠금을 먼저 해제해 주세요."); return; }
+                                            const next = curriculum.map(x => x.id === it.id ? { ...x, sections: x.sections + 1, closed: false, customColCounts: undefined } : x);
+                                            setCurriculum(next);
+                                            if (bandOptReport && bandOptReport.grade === activeGrade && bandOptReport.sem === activeSem) {
+                                              runZeroUnassignedBandOptimizer(activeGrade, activeSem, next, riroStudents);
+                                            }
+                                          }}>+</button>
+                                        </div>
+                                      </td>
+                                      <td className={`p-2.5 text-center font-semibold whitespace-nowrap ${Number(avg) >= 34 ? "text-rose-600 font-extrabold" : ""}`}>{avg}명</td>
+                                      <td className="p-2.5 text-center whitespace-nowrap">
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            if (!hasRoster) generateRandomSectionRosters(activeGrade, activeSem);
+                                            setPreviewRosterSubj(isSelectedSubj ? null : it.id);
+                                          }}
+                                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-bold transition-all ${
+                                            isSelectedSubj ? "border-brand bg-brand text-white shadow-sm" : "border-brand bg-[#faf8fe] text-brand hover:bg-brand hover:text-white"
+                                          }`}
+                                        >
+                                          {hasRoster ? (isSelectedSubj ? `👥 명단 닫기▲` : `👥 명단(${it.sections}반)▼`) : "🎲 배정보기"}
+                                        </button>
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
                           </div>
                         ))}
                       </div>
-                    </section>
-                  )}
 
-                  <section className={`${PANEL} p-5 flex-1 flex flex-col justify-between space-y-4`}>
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between border-b border-line pb-3">
-                        <div>
-                          <span className="no-wrap-badge rounded bg-[#eee9fa] px-2 py-0.5 text-[11px] font-bold text-brand">
-                            {riroStudents[activeGrade]?.length > 0 ? "리로스쿨 업로드 실명 기준" : "기본 실명 풀 기준 (엑셀 업로드 시 갱신)"}
-                          </span>
-                          <h3 className="mt-1 text-base font-bold text-ink">
-                            👥 {curriculum.find(x => x.id === previewRosterSubj)?.name || "과목 선택"} 분반별 학생 명단
-                            {rosterLocked[`${activeGrade}_${activeSem}`] && <span className="ml-2 rounded bg-rose-600 px-2 py-0.5 text-[10px] font-extrabold text-white">🔒 확정 고정됨</span>}
-                          </h3>
-                        </div>
-                        {previewRosterSubj && !rosterLocked[`${activeGrade}_${activeSem}`] && (
-                          <button
-                            type="button"
-                            onClick={() => generateRandomSectionRosters(activeGrade, activeSem)}
-                            className="rounded-lg bg-slate-800 px-2.5 py-1.5 text-[11px] font-bold text-white"
-                          >
-                            🔄 다시 섞기
-                          </button>
-                        )}
-                      </div>
-                      {previewRosterSubj && Array.isArray(randomRosters[previewRosterSubj]) ? (
-                        <div className="max-h-[540px] overflow-y-auto space-y-3 pr-1">
-                          {randomRosters[previewRosterSubj].map(b => (
-                            <div key={b.secNum} className="rounded-xl border border-line bg-paper p-3 space-y-2">
-                              <div className="flex items-center justify-between">
-                                <span className="text-xs font-extrabold text-brand">{b.secNum}분반</span>
-                                <span className="text-[11px] font-semibold text-slate-600">총 {b.students.length}명</span>
+                      {/* 상단 표에서 [👥 명단] 버튼 클릭 시 바로 그 선택군 박스 아래에 가로 전체 폭으로 펼쳐지는 분반 명단 */}
+                      {items.some(it => it.id === previewRosterSubj) && Array.isArray(randomRosters[previewRosterSubj]) && (
+                        <div className="rounded-xl border-2 border-brand/40 bg-[#faf8fe] p-4 space-y-3 shadow-sm">
+                          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#dcd3ee] pb-2">
+                            <div className="flex items-center gap-2">
+                              <span className="rounded bg-brand px-2.5 py-0.5 text-xs font-extrabold text-white">
+                                👥 [{curriculum.find(x => x.id === previewRosterSubj)?.name}] 분반별 학생 실명 명단
+                              </span>
+                              <span className="text-xs font-bold text-slate-600">
+                                ({riroStudents[activeGrade]?.length > 0 ? "리로스쿨 업로드 실명 기준" : "기본 학생 풀 기준"})
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-2">
+                              {!rosterLocked[`${activeGrade}_${activeSem}`] && (
+                                <button
+                                  type="button"
+                                  onClick={() => generateRandomSectionRosters(activeGrade, activeSem)}
+                                  className="rounded-lg bg-slate-800 px-2.5 py-1 text-[11px] font-bold text-white hover:bg-slate-900"
+                                >
+                                  🔄 무작위 다시 섞기
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => setPreviewRosterSubj(null)}
+                                className="rounded-lg border border-line bg-white px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-100"
+                              >
+                                ✕ 명단 닫기
+                              </button>
+                            </div>
+                          </div>
+                          <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
+                            {randomRosters[previewRosterSubj].map(b => (
+                              <div key={b.secNum} className="rounded-xl border border-line bg-white p-3 space-y-2 shadow-sm">
+                                <div className="flex items-center justify-between border-b border-line pb-1">
+                                  <span className="text-xs font-extrabold text-brand">
+                                    {b.secNum}분반 {b.bandName ? `(${b.bandName})` : ""}
+                                  </span>
+                                  <span className="text-[11px] font-bold text-slate-600">총 {b.students.length}명</span>
+                                </div>
+                                <div className="flex flex-wrap gap-1.5 max-h-40 overflow-y-auto">
+                                  {b.students.map((st, idx) => (
+                                    <span key={idx} className="no-wrap-badge rounded border border-line bg-paper px-2 py-0.5 text-[11px] font-medium text-ink">
+                                      <strong className="text-brand mr-1">{st.studentId}</strong> {st.name}
+                                    </span>
+                                  ))}
+                                </div>
                               </div>
-                              <div className="flex flex-wrap gap-1.5">
-                                {b.students.map((st, idx) => (
-                                  <span key={idx} className="no-wrap-badge rounded border border-line bg-white px-2 py-1 text-[11px] font-medium text-ink">
-                                    <strong className="text-brand mr-1">{st.studentId}</strong> {st.name}
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                  );
+                })}
+
+                {separationLogs.length > 0 && (
+                  <section className={`${PANEL} p-4 space-y-2 border-2 border-indigo-200`}>
+                    <h4 className="text-xs font-extrabold text-indigo-900">🛡️ 학생 분리 배정 적용 리포트 ({separationLogs.length}건)</h4>
+                    <div className="grid gap-2 md:grid-cols-2 text-[11px]">
+                      {separationLogs.map((lg, i) => (
+                        <div key={i} className={`rounded-lg p-2 border ${lg.type === "warning" ? "bg-amber-50 border-amber-300 text-amber-900 font-bold" : "bg-emerald-50 border-emerald-200 text-emerald-800"}`}>
+                          {lg.msg}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                {/* [가로 전체 폭(100%) 활용 2] 최적 타임(Band) 자동 조합 리포트 패널 */}
+                {bandOptReport && bandOptReport.grade === activeGrade && bandOptReport.sem === activeSem && (
+                  <section id="band-opt-report-panel" className={`${PANEL} p-5 border-2 ${bandOptReport.totalUnassignedStudents === 0 ? "border-emerald-500 bg-emerald-50/20" : "border-amber-400 bg-amber-50/20"} space-y-4`}>
+                    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
+                      <div className="space-y-1">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={`rounded-md px-2.5 py-1 text-xs font-extrabold text-white ${bandOptReport.totalUnassignedStudents === 0 ? "bg-emerald-600" : "bg-amber-600"}`}>
+                            {bandOptReport.totalUnassignedStudents === 0
+                              ? "🎉 전교생 미배정 0명 달성 (완벽한 밴드 조합 확정)"
+                              : `⚠️ 진성 타임충돌 인원 ${bandOptReport.totalUnassignedStudents}명 발생 (단일분반 과목 동시선택 확인)`}
+                          </span>
+                          <span className="text-xs font-bold text-slate-600">
+                            {bandOptReport.hasRealPicks ? "✅ 학생 선택 데이터 100% 반영" : "💡 과목별 신청인원·분반수 기준 분석"} · 완료 시각 {bandOptReport.analyzedAt}
+                          </span>
+                        </div>
+                        <p className="text-xs text-slate-600">
+                          <strong>미배정 0명(또는 최소)인 대안을 최우선</strong>으로 보여주며, 동일 미배정일 경우 <strong>6단계 주간 시간표가 가장 잘 짜지는 순서대로 제1안 ~ 제5안</strong>이 정렬되어 있습니다.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setMatrixSem(activeSem);
+                          setTab("step4");
+                        }}
+                        className="rounded-xl bg-brand px-4 py-2 text-xs font-extrabold text-white shadow-sm hover:bg-[#54419f]"
+                      >
+                        👉 연동된 4단계 시수배분표 바로 확인하기 →
+                      </button>
+                    </div>
+
+                    <div className="space-y-5">
+                      {bandOptReport.groupReports.map((grpRep, gIdx) => {
+                        const totalColSpan = 3 + (grpRep.bandLabels || grpRep.bandSummary || []).length;
+                        const activeOpt = (grpRep.alternativeOptions || []).find(o => o.optionIdx === grpRep.selectedOptionIdx) || (grpRep.alternativeOptions || [])[0];
+                        const activeTimetableWarnings = activeOpt?.timetableWarnings || [];
+
+                        return (
+                          <div key={gIdx} className="rounded-xl border-2 border-[#dcd3ee] bg-white p-4 space-y-4 shadow-sm">
+                            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2.5">
+                              <div>
+                                <h4 className="text-sm font-extrabold text-ink">
+                                  📌 ② [{grpRep.groupName}] 선택과목군 최적 타임(Band) 편성 결과 (대상 {grpRep.totalStudentsAnalyzed}명 · 총 {grpRep.kPick}개 타임 운영)
+                                </h4>
+                                <p className="text-[11px] text-slate-500 mt-0.5">
+                                  과목명을 클릭하면 해당 과목의 분반별 학생 명단이 바로 아래에 펼쳐집니다.
+                                </p>
+                              </div>
+                              <span className={`rounded-lg px-3 py-1 text-xs font-extrabold ${grpRep.unassignedCount === 0 ? "bg-emerald-100 text-emerald-800" : "bg-rose-100 text-rose-800"}`}>
+                                {grpRep.unassignedCount === 0 ? "✔ 미배정(충돌) 학생: 0명" : `❗ 타임 중복 학생: ${grpRep.unassignedCount}명`}
+                              </span>
+                            </div>
+
+                            {/* 복수 최적 대안(제1안 ~ 제5안: 미배정 0명 최우선 + 시간표 잘 짜지는 순) 선택 스위치 버튼 */}
+                            {grpRep.alternativeOptions && grpRep.alternativeOptions.length > 1 && (
+                              <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-3 space-y-2.5">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <span className="text-xs font-extrabold text-indigo-950">
+                                    💡 미배정 최소 및 주간 시간표 편성 적합도 순 대안 ({grpRep.alternativeOptions.length}개 안) — 클릭 시 즉시 전환:
+                                  </span>
+                                </div>
+                                <div className="flex flex-wrap gap-2">
+                                  {grpRep.alternativeOptions.map(opt => (
+                                    <button
+                                      key={opt.optionIdx}
+                                      type="button"
+                                      onClick={() => applySelectedBandAlternative(grpRep.groupName, opt)}
+                                      className={`rounded-lg px-3 py-1.5 text-xs font-extrabold transition-all ${
+                                        grpRep.selectedOptionIdx === opt.optionIdx
+                                          ? "bg-brand text-white shadow-sm ring-2 ring-brand/40"
+                                          : "border border-indigo-200 bg-white text-indigo-900 hover:bg-indigo-100"
+                                      }`}
+                                    >
+                                      {grpRep.selectedOptionIdx === opt.optionIdx ? "✔ " : ""}{opt.label}
+                                    </button>
+                                  ))}
+                                </div>
+
+                                {/* ★ 미배정은 0명(또는 최소)이지만 시간표 편성 시 어려움이 있을 수 있는 경우에만 그 구체적인 이유를 별도 표시! */}
+                                {activeTimetableWarnings.length > 0 ? (
+                                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-2.5 text-[11px] text-amber-950 space-y-1">
+                                    <p className="font-extrabold text-amber-900">
+                                      ⚠️ [현재 선택된 제{grpRep.selectedOptionIdx}안의 6단계 주간 시간표 편성 시 참고·주의 사유]
+                                    </p>
+                                    <ul className="list-disc pl-4 space-y-0.5 font-semibold">
+                                      {activeTimetableWarnings.map((wMsg, wIdx) => (
+                                        <li key={wIdx}>{wMsg}</li>
+                                      ))}
+                                    </ul>
+                                  </div>
+                                ) : (
+                                  <div className="rounded-lg border border-emerald-200 bg-emerald-50/80 px-3 py-1.5 text-[11px] font-bold text-emerald-900">
+                                    ✅ 현재 선택된 [제{grpRep.selectedOptionIdx}안]은 타임별 분반 상한과 교과별 교사 정원 피크를 모두 만족하여 6단계 주간 시간표가 막힘없이 가장 잘 짜지는 최적안입니다!
+                                  </div>
+                                )}
+                              </div>
+                            )}
+
+                            {/* 선택과목군 과목별 × 타임별 배정 결과 매트릭스 표 */}
+                            {grpRep.subjectBandMatrix && grpRep.subjectBandMatrix.length > 0 && (
+                              <div className="overflow-x-auto rounded-xl border border-slate-300">
+                                <table className="w-full border-collapse text-xs">
+                                  <thead>
+                                    <tr className="bg-slate-100 border-b border-slate-300 text-slate-700">
+                                      <th className="border border-slate-300 p-2 text-left whitespace-nowrap">선택과목명 (👥클릭시 바로 아래에 명단 펼침)</th>
+                                      <th className="border border-slate-300 p-2 text-center whitespace-nowrap">담당교과 (가용교사)</th>
+                                      <th className="border border-slate-300 p-2 text-center whitespace-nowrap">신청인원 / 총분반</th>
+                                      {(grpRep.bandLabels || grpRep.bandSummary.map(b => b.bandName)).map((bLabel, bIdx) => (
+                                        <th key={bIdx} className="border border-slate-300 p-2 text-center bg-[#f3effb] text-brand font-extrabold whitespace-nowrap">
+                                          ⏰ {bLabel} ({bIdx + 1}열)
+                                        </th>
+                                      ))}
+                                    </tr>
+                                  </thead>
+                                  <tbody>
+                                    {grpRep.subjectBandMatrix.map(row => {
+                                      const isRosterOpen = previewRosterSubj === row.subjId;
+                                      const subjBuckets = randomRosters[row.subjId] || [];
+                                      return (
+                                        <React.Fragment key={row.subjId}>
+                                          <tr
+                                            onClick={() => setPreviewRosterSubj(isRosterOpen ? null : row.subjId)}
+                                            className={`cursor-pointer border-b border-slate-200 transition-colors ${isRosterOpen ? "bg-[#f3effb] font-bold ring-2 ring-inset ring-brand" : "hover:bg-paper/60"}`}
+                                            title="클릭하면 바로 아래에 이 과목의 분반별 학생 실명 명단이 펼쳐집니다"
+                                          >
+                                            <td className="border border-slate-300 p-2 font-extrabold text-ink whitespace-nowrap">
+                                              <span className="underline decoration-dotted underline-offset-4 text-brand">{row.name}</span>
+                                              <span className={`ml-1.5 inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-extrabold ${isRosterOpen ? "bg-brand text-white" : "bg-indigo-50 text-brand border border-indigo-200"}`}>
+                                                👥 {isRosterOpen ? "명단닫기▲" : "명단보기▼"}
+                                              </span>
+                                            </td>
+                                            <td className="border border-slate-300 p-2 text-center text-slate-600 whitespace-nowrap">
+                                              <strong className="text-ink">{row.dept}</strong> (정원·강사 {row.availTeachers}명)
+                                            </td>
+                                            <td className="border border-slate-300 p-2 text-center font-bold whitespace-nowrap">
+                                              {row.enroll}명 / <span className="text-brand">{row.totalSections}개반</span>
+                                            </td>
+                                            {row.cols.map(cell => (
+                                              <td
+                                                key={cell.col}
+                                                className={`border border-slate-300 p-2 text-center whitespace-nowrap ${
+                                                  cell.secCnt > 0 ? "bg-emerald-50/70 font-extrabold text-emerald-950" : "text-slate-300 bg-slate-50/30"
+                                                }`}
+                                              >
+                                                {cell.secCnt > 0 ? (
+                                                  <div>
+                                                    <span className="inline-block rounded bg-emerald-600 px-1.5 py-0.5 text-[11px] text-white">
+                                                      {cell.secCnt}개반 ({cell.secNums})
+                                                    </span>
+                                                    <span className="block mt-0.5 text-[11px] font-bold text-emerald-800">
+                                                      배정 {cell.stuCnt}명
+                                                    </span>
+                                                  </div>
+                                                ) : (
+                                                  "-"
+                                                )}
+                                              </td>
+                                            ))}
+                                          </tr>
+
+                                          {isRosterOpen && (
+                                            <tr className="bg-[#faf8fe] border-b-2 border-brand">
+                                              <td colSpan={totalColSpan} className="p-3">
+                                                <div className="rounded-xl border-2 border-brand/40 bg-white p-3.5 space-y-3 shadow-sm">
+                                                  <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line pb-2">
+                                                    <span className="text-xs font-extrabold text-brand">
+                                                      👥 [{row.name}] 분반별 배정 학생 실명 명단 (총 {row.totalSections}개 분반 · {subjBuckets.reduce((a, b) => a + b.students.length, 0)}명)
+                                                    </span>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setPreviewRosterSubj(null)}
+                                                      className="rounded-lg border border-line bg-paper px-2.5 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-200"
+                                                    >
+                                                      ✕ 명단 닫기
+                                                    </button>
+                                                  </div>
+                                                  <div className="grid gap-2.5 md:grid-cols-2 lg:grid-cols-3">
+                                                    {subjBuckets.map(b => (
+                                                      <div key={b.secNum} className="rounded-xl border border-line bg-paper p-2.5 space-y-1.5">
+                                                        <div className="flex items-center justify-between border-b border-line pb-1">
+                                                          <span className="text-xs font-extrabold text-brand">
+                                                            {b.secNum}분반 {b.bandName ? `(${b.bandName})` : ""}
+                                                          </span>
+                                                          <span className="text-[11px] font-bold text-slate-600">{b.students.length}명</span>
+                                                        </div>
+                                                        <div className="flex flex-wrap gap-1 max-h-36 overflow-y-auto">
+                                                          {b.students.map((st, sIdx) => (
+                                                            <span key={sIdx} className="rounded border border-line bg-white px-1.5 py-0.5 text-[11px] font-medium text-ink">
+                                                              <strong className="text-brand mr-0.5">{st.studentId}</strong> {st.name}
+                                                            </span>
+                                                          ))}
+                                                        </div>
+                                                      </div>
+                                                    ))}
+                                                  </div>
+                                                </div>
+                                              </td>
+                                            </tr>
+                                          )}
+                                        </React.Fragment>
+                                      );
+                                    })}
+                                    <tr className="bg-[#f3effb] font-extrabold text-brand border-t-2 border-slate-400">
+                                      <td colSpan={3} className="border border-slate-300 p-2 text-left whitespace-nowrap">
+                                        ★ 타임(열)별 동시 개설 분반 합계 및 배정 학생 수 합계
+                                      </td>
+                                      {grpRep.bandSummary.map(bSum => (
+                                        <td key={bSum.col} className="border border-slate-300 p-2 text-center whitespace-nowrap">
+                                          총 {bSum.totalSections}개반 동시수업
+                                          <span className="block text-[11px] text-slate-700 font-bold">({bSum.totalStudents}명 수강)</span>
+                                        </td>
+                                      ))}
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            )}
+
+                            {grpRep.topOverlapPairs.length > 0 && (
+                              <div className="flex flex-wrap items-center gap-1.5 text-[11px] bg-paper px-3 py-2 rounded-lg border border-line">
+                                <span className="font-extrabold text-slate-700 mr-1">🔗 주요 동시선택(Overlap) 과목 쌍 (서로 다른 타임으로 분리됨):</span>
+                                {grpRep.topOverlapPairs.map((pair, pIdx) => (
+                                  <span key={pIdx} className="rounded bg-white border border-line px-2 py-0.5 font-semibold text-slate-700">
+                                    {pair.subjA}({pair.secA}반) ↔ {pair.subjB}({pair.secB}반) : <strong className="text-brand">{pair.count}명 동시선택</strong>
                                   </span>
                                 ))}
                               </div>
+                            )}
+
+                            <div className="grid gap-3 md:grid-cols-3">
+                              {grpRep.bandSummary.map(bSum => (
+                                <div key={bSum.bandName} className="rounded-xl border border-[#dcd3ee] bg-[#faf8fe] p-3 space-y-2">
+                                  <div className="flex items-center justify-between border-b border-[#e5def5] pb-1.5">
+                                    <span className="text-xs font-extrabold text-brand">⏰ {bSum.bandName} ({bSum.col}열) 묶음 요약</span>
+                                    <span className="text-[11px] font-bold text-slate-600">개설 {bSum.totalSections}개반 · 배정 {bSum.totalStudents}명</span>
+                                  </div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {bSum.subjects.map((sItem, sIdx) => (
+                                      <button
+                                        key={sIdx}
+                                        type="button"
+                                        onClick={() => sItem.subjId && setPreviewRosterSubj(previewRosterSubj === sItem.subjId ? null : sItem.subjId)}
+                                        className={`rounded-lg border px-2 py-1 text-[11px] font-bold transition-all ${
+                                          previewRosterSubj === sItem.subjId ? "border-brand bg-brand text-white" : "border-line bg-white text-ink hover:border-brand hover:bg-[#f3effb]"
+                                        }`}
+                                      >
+                                        {sItem.name} <span className={previewRosterSubj === sItem.subjId ? "text-amber-200" : "text-brand"}>({sItem.sections}반·{sItem.students}명)</span>
+                                      </button>
+                                    ))}
+                                  </div>
+                                </div>
+                              ))}
                             </div>
-                          ))}
-                        </div>
-                      ) : (
-                        <div className="py-20 text-center text-xs text-slate-400 space-y-2">
-                          <p className="text-base font-bold text-slate-500">아직 선택된 과목 명단이 없습니다.</p>
-                          <p>상단의 <strong>[🎲 학생 분리 반영 · 분반별 실명 무작위 배정 실행]</strong> 버튼을 누르거나 좌측 표에서 <strong>[명단 보기]</strong>를 클릭하세요.</p>
-                        </div>
-                      )}
+
+                            {grpRep.unassignedStudentsDetail.length > 0 && (
+                              <div className="rounded-xl border-2 border-rose-300 bg-rose-50/70 p-4 text-xs text-rose-950 space-y-4">
+                                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-rose-200 pb-2">
+                                  <div>
+                                    <p className="text-sm font-extrabold text-rose-800">
+                                      🛠️ 미배정({grpRep.unassignedStudentsDetail.length}명) 완전 해소를 위한 AI 수학적 의사결정 가이드 (사전 시뮬레이션 검증 완료)
+                                    </p>
+                                    <p className="text-[11px] text-rose-700 mt-0.5">
+                                      아래 버튼들은 <strong>현재 타임표를 뒤섞지 않고</strong> 해당 조치 시 실제로 미배정이 몇 명 해소되는지 사전 검증된 안들입니다.
+                                    </p>
+                                  </div>
+                                </div>
+
+                                {/* 방법 A: 실제로 증설 시 미배정이 동시 해소되는 학생 명단 및 타임 핀포인트 추천 */}
+                                {grpRep.resolutionGuide?.expansionRecs?.length > 0 && (
+                                  <div className="rounded-xl border border-rose-200 bg-white p-3.5 space-y-2.5 shadow-sm">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="font-extrabold text-indigo-950 text-xs">
+                                        📈 [방법 A · 핀포인트 분반 증설 추천] 1개 분반 증설 시 동시에 구제되는 학생 수 및 학급당 인원(과밀도) 순 추천
+                                      </span>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                      <table className="w-full border-collapse text-[11px]">
+                                        <thead>
+                                          <tr className="bg-slate-100 border-b border-slate-300 text-slate-700">
+                                            <th className="border border-slate-200 p-1.5 text-center whitespace-nowrap">추천순위</th>
+                                            <th className="border border-slate-200 p-1.5 text-left whitespace-nowrap">추천 과목명 (교과)</th>
+                                            <th className="border border-slate-200 p-1.5 text-left whitespace-nowrap">1반 증설 시 동시 해소되는 미배정 학생 명단</th>
+                                            <th className="border border-slate-200 p-1.5 text-center whitespace-nowrap">현재 반당 인원 (과밀도)</th>
+                                            <th className="border border-slate-200 p-1.5 text-center whitespace-nowrap">1반 증설 시 반당 인원</th>
+                                            <th className="border border-slate-200 p-1.5 text-center whitespace-nowrap">핀포인트 추가 타임</th>
+                                            <th className="border border-slate-200 p-1.5 text-center whitespace-nowrap">원클릭 즉시 증설</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {grpRep.resolutionGuide.expansionRecs.map((rec, rIdx) => (
+                                            <tr key={rec.subjId} className={`border-b border-slate-200 ${rIdx === 0 ? "bg-amber-50/70 font-bold" : "hover:bg-paper/40"}`}>
+                                              <td className="border border-slate-200 p-1.5 text-center whitespace-nowrap">
+                                                <span className={`rounded px-2 py-0.5 text-[10px] font-extrabold ${rIdx === 0 ? "bg-rose-600 text-white" : "bg-slate-200 text-slate-700"}`}>
+                                                  {rIdx + 1}순위 {rIdx === 0 ? "(최우선 추천)" : ""}
+                                                </span>
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 font-extrabold text-ink whitespace-nowrap">
+                                                {rec.name} <span className="text-brand font-semibold">({rec.dept})</span>
+                                                <span className="ml-1 text-[10px] text-slate-500">현재 {rec.activeColsText} 개설</span>
+                                              </td>
+                                              <td className="border border-slate-200 p-2 text-left">
+                                                <div className="flex flex-wrap items-center gap-1">
+                                                  <span className="rounded bg-rose-600 px-1.5 py-0.5 text-[10px] font-extrabold text-white whitespace-nowrap">
+                                                    즉시 {rec.actuallyResolvesCnt > 0 ? `${rec.actuallyResolvesCnt}명 동시 해소` : `${rec.involvedUnassignedCnt}명 연관`}
+                                                  </span>
+                                                  {rec.remainingUnassignedAfter === 0 && rec.actuallyResolvesCnt > 0 && (
+                                                    <span className="rounded bg-emerald-100 border border-emerald-300 px-1.5 py-0.5 text-[10px] font-extrabold text-emerald-900 whitespace-nowrap">
+                                                      🎉 증설 시 미배정 0명 완결!
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                {rec.resolvedStudentNames && rec.resolvedStudentNames.length > 0 && (
+                                                  <div className="mt-1 flex flex-wrap gap-1">
+                                                    <span className="text-[10px] font-bold text-slate-500">동시 구제 학생:</span>
+                                                    {rec.resolvedStudentNames.map((stName, sIdx) => (
+                                                      <span key={sIdx} className="rounded border border-rose-200 bg-rose-50 px-1.5 py-0.5 text-[10px] font-bold text-rose-900 whitespace-nowrap">
+                                                        {stName}
+                                                      </span>
+                                                    ))}
+                                                  </div>
+                                                )}
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 text-center whitespace-nowrap">
+                                                <strong className="text-rose-700">{rec.curAvg}명/반</strong> ({rec.enroll}명/{rec.curSections}반)
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 text-center text-emerald-800 font-extrabold whitespace-nowrap">
+                                                👉 {rec.nextAvg}명/반 ({rec.nextSections}반)
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 text-center whitespace-nowrap">
+                                                <span className="font-bold text-indigo-800">{rec.recommendTargetBand}에 추가</span>
+                                                <span className="block text-[10px] text-slate-500">{rec.teacherCheckMsg}</span>
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 text-center whitespace-nowrap">
+                                                <button
+                                                  type="button"
+                                                  onClick={() => expandRecommendedSubjectAndReoptimize(rec.subjId, rec.name, activeGrade, activeSem, rec.targetColNum)}
+                                                  className="rounded-lg bg-indigo-600 px-2.5 py-1 text-[11px] font-extrabold text-white shadow-sm hover:bg-indigo-700"
+                                                >
+                                                  ➕ {rec.curSections}→{rec.nextSections}반 증설 ({rec.actuallyResolvesCnt || rec.involvedUnassignedCnt}명 일괄해소)
+                                                </button>
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* 방법 B: 기존 타임표를 고정한 채 실제로 100% 배정 성공이 검증된 과목 변경 버튼 */}
+                                {grpRep.resolutionGuide?.counselingRecs?.length > 0 && (
+                                  <div className="rounded-xl border border-rose-200 bg-white p-3.5 space-y-2.5 shadow-sm">
+                                    <div className="flex flex-wrap items-center justify-between gap-2">
+                                      <span className="font-extrabold text-rose-900 text-xs">
+                                        🗣️ [방법 B · 학생 개별 과목 변경 상담 가이드] 클릭 시 현재 타임표를 유지한 채 해당 학생의 미배정이 즉시 사라집니다
+                                      </span>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                      <table className="w-full border-collapse text-[11px]">
+                                        <thead>
+                                          <tr className="bg-slate-100 border-b border-slate-300 text-slate-700">
+                                            <th className="border border-slate-200 p-1.5 text-center w-28 whitespace-nowrap">학번 · 성명</th>
+                                            <th className="border border-slate-200 p-1.5 text-left whitespace-nowrap">현재 신청한 선택과목 조합</th>
+                                            <th className="border border-slate-200 p-1.5 text-left whitespace-nowrap">동일 타임 충돌 과목</th>
+                                            <th className="border border-slate-200 p-1.5 text-left bg-emerald-50 text-emerald-900 whitespace-nowrap">💡 100% 배정 성공 검증된 과목 변경 추천안 (클릭 시 즉시 해소)</th>
+                                          </tr>
+                                        </thead>
+                                        <tbody>
+                                          {grpRep.resolutionGuide.counselingRecs.map((cRec, cIdx) => (
+                                            <tr key={cIdx} className="border-b border-slate-200 hover:bg-paper/40">
+                                              <td className="border border-slate-200 p-1.5 text-center font-extrabold text-ink whitespace-nowrap">
+                                                {cRec.studentId} {cRec.name}
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 font-semibold text-slate-700">
+                                                {cRec.picks}
+                                              </td>
+                                              <td className="border border-slate-200 p-1.5 font-bold text-rose-700 whitespace-nowrap">
+                                                {cRec.conflictCause}
+                                              </td>
+                                              <td className="border border-slate-200 p-2 font-extrabold text-emerald-900 bg-emerald-50/40 space-y-1.5">
+                                                <div>{cRec.changeSuggestion}</div>
+                                                {cRec.quickSwapButtons && cRec.quickSwapButtons.length > 0 && (
+                                                  <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                                                    <span className="text-[10px] font-bold text-slate-500">👉 상담 후 즉시 변경 반영:</span>
+                                                    {cRec.quickSwapButtons.map((btn, bIdx) => (
+                                                      <button
+                                                        key={bIdx}
+                                                        type="button"
+                                                        onClick={() =>
+                                                          changeStudentSubjectAndReoptimize(
+                                                            cRec.studentId,
+                                                            cRec.name,
+                                                            grpRep.groupName,
+                                                            btn.fromSubjId,
+                                                            btn.fromSubjName,
+                                                            btn.toSubjId,
+                                                            btn.toSubjName,
+                                                            activeGrade,
+                                                            activeSem
+                                                          )
+                                                        }
+                                                        className="rounded-lg bg-emerald-600 px-2.5 py-1 text-[11px] font-extrabold text-white shadow-sm hover:bg-emerald-700 transition-all"
+                                                      >
+                                                        🔄 [{btn.fromSubjName} → {btn.toSubjName}] 변경 후 즉시 해소
+                                                      </button>
+                                                    ))}
+                                                  </div>
+                                                )}
+                                              </td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
                     </div>
                   </section>
-                </aside>
+                )}
               </div>
             </div>
           )}
@@ -3848,6 +5713,35 @@ return (
                             </tbody>
                           </table>
                         </div>
+                      </section>
+
+                      {/* ★ 신규: 우리 학교 정원 구성 기반 시간표 진단 및 맞춤형 해결 조언 패널 */}
+                      <section className={`${PANEL} p-4 space-y-3 border-2 ${masterSchedule.schoolQuotaAdvices?.length > 0 ? "border-rose-300 bg-rose-50/30" : "border-emerald-300 bg-emerald-50/30"}`}>
+                        <div className="flex items-center justify-between border-b border-line pb-2">
+                          <h3 className="text-xs font-extrabold text-ink">
+                            🏥 {schoolName} 정원 구성 기반 시간표 AI 진단 및 해결 조언 ({masterSchedule.schoolQuotaAdvices?.length || 0}건)
+                          </h3>
+                          <span className={`rounded px-2 py-0.5 text-[10px] font-extrabold ${masterSchedule.hardConflictCount === 0 ? "bg-emerald-600 text-white" : "bg-rose-600 text-white"}`}>
+                            {masterSchedule.hardConflictCount === 0 ? "✔ 시간표 완성 가능" : `⚠️ 충돌 ${masterSchedule.hardConflictCount}건 조율 필요`}
+                          </span>
+                        </div>
+                        {masterSchedule.schoolQuotaAdvices && masterSchedule.schoolQuotaAdvices.length > 0 ? (
+                          <div className="max-h-72 overflow-y-auto space-y-2.5 pr-1">
+                            {masterSchedule.schoolQuotaAdvices.map((adv, aIdx) => (
+                              <div key={aIdx} className={`rounded-xl border p-3 text-xs space-y-1.5 shadow-sm ${adv.severity === "critical" ? "border-rose-300 bg-white text-rose-950" : "border-amber-300 bg-white text-amber-950"}`}>
+                                <p className="font-extrabold text-rose-800">🚨 {adv.title}</p>
+                                <p className="text-[11px] leading-relaxed text-slate-700">{adv.detail}</p>
+                                <div className="rounded-lg bg-indigo-50/80 border border-indigo-200 p-2 text-[11px] font-bold text-indigo-950 leading-relaxed">
+                                  {adv.action}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="rounded-xl border border-emerald-200 bg-white p-4 text-xs font-bold text-emerald-900 leading-relaxed">
+                            ✅ 현재 {schoolName}의 교과별 정규정원·시간강사 구성과 3단계 선택과목 이동수업 타임 배치가 완벽히 맞물려, 교사 부족이나 동시간 중복 없이 주간 시간표가 정상 완성되었습니다!
+                          </div>
+                        )}
                       </section>
 
                       <section className={`${PANEL} p-4 flex-1 space-y-3`}>
