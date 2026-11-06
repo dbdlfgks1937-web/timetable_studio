@@ -407,7 +407,7 @@ function buildDefaultBandsForCurriculum(currList, quotaMap = DEFAULT_QUOTA, lecM
 }
 
 function TimetableStudioApp() {
-  const [tab, setTab] = useState("step4");
+  const [tab, setTab] = useState("step1");
   const [schoolName, setSchoolName] = useState("광영고등학교");
   const [classCounts, setClassCounts] = useState({ 1: 7, 2: 7, 3: 7 });
   const [dayPeriods, setDayPeriods] = useState({ 월: 7, 화: 7, 수: 6, 목: 6, 금: 6 });
@@ -543,6 +543,11 @@ function TimetableStudioApp() {
     try {
       const saved = JSON.parse(localStorage.getItem(STORE_KEY) || "null");
       if (saved) {
+        if (saved.lastTab) {
+          setTab(saved.lastTab);
+          const stepNames = { step1: "1단계(기초·편제표)", step2: "2단계(교원정원·강사)", step3: "3단계(분반·미배정해소)", step4: "4단계(시수배분표)", step5: "5단계(교사배정)", step6: "6단계(주간시간표)" };
+          setToast(`👋 이전에 작업하시던 [${stepNames[saved.lastTab] || "작업 화면"}]에서 이어서 시작합니다. (처음부터 보시려면 상단 1단계를 눌러주세요)`);
+        }
         if (saved.schoolName) setSchoolName(saved.schoolName);
         if (saved.aiApiKey) setAiApiKey(saved.aiApiKey);
         if (saved.classCounts) setClassCounts(saved.classCounts);
@@ -580,11 +585,11 @@ function TimetableStudioApp() {
     setBandPlan(rebuilt);
     try {
       localStorage.setItem(STORE_KEY, JSON.stringify({
-        schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot,
+        lastTab: tab, schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot,
         separatePairsInput, randomRosters, rosterLocked, bandOptReport, quota, lecturerHours, avgTargetHours, curriculum, bandPlan: rebuilt, teachers, councilSheet
       }));
     } catch {}
-  }, [schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot, separatePairsInput, randomRosters, rosterLocked, bandOptReport, quota, lecturerHours, avgTargetHours, curriculum, teachers, councilSheet]);
+  }, [tab, schoolName, aiApiKey, classCounts, dayPeriods, jayulMode, jayulSlot, jinroMode, jinroSlot, dongariMode, dongariSlot, separatePairsInput, randomRosters, rosterLocked, bandOptReport, quota, lecturerHours, avgTargetHours, curriculum, teachers, councilSheet]);
 
   // [신규 3번] 타 학교 공유/집-학교 연동용 전체 작업 백업(.json) 다운로드 및 불러오기, 타학교 초기화
   const exportFullProjectJSON = () => {
